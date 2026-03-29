@@ -279,8 +279,8 @@ async def discover_and_connect():
         rendering_control = rc
         try:
             state.volume = await dlna_get_volume()
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("GetVolume not supported on %s: %s", dev.friendly_name, e)
         log.info("Reconnected to last device: %s (%s)", dev.friendly_name, location)
     elif av_transport is None and discovered_devices:
         names = ", ".join(discovered_devices.keys())
@@ -297,8 +297,8 @@ async def connect_to_device(description_url: str):
     rendering_control = device.service("urn:schemas-upnp-org:service:RenderingControl:1")
     try:
         state.volume = await dlna_get_volume()
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("GetVolume not supported on %s: %s", device.friendly_name, e)
     state.last_device = device.friendly_name
     state.last_device_url = description_url
     _save_state()
@@ -795,8 +795,8 @@ async def _download_playlist_tracks(tracks: list[Track], play_first: bool = Fals
             if i == 0 and play_first and _device_ready():
                 try:
                     await _play_current()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("Auto-play first playlist track failed: %s", e)
 
             state.download.done = i + 1
             log.info("Downloaded [%d/%d]: %s", i + 1, len(tracks), track.title)
@@ -915,8 +915,8 @@ async def api_status():
     try:
         transport_state = await dlna_get_transport_state()
         position = await dlna_get_position()
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Status poll failed: %s", e)
     # Volume is cached, updated only on connect and after volume API calls
 
     current = None
