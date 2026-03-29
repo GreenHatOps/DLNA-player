@@ -278,6 +278,16 @@ async def discover_and_connect():
         except Exception as e:
             log.debug("Skipping %s: %s", location, e)
 
+    # If name/URL match didn't work (device half-awake), try connecting by URL directly
+    if not last_known and av_transport is None and state.last_device_url:
+        if state.last_device_url in found:
+            try:
+                log.info("Retrying direct connect to %s", state.last_device_url)
+                await connect_to_device(state.last_device_url)
+                return
+            except Exception as e:
+                log.debug("Direct reconnect failed: %s", e)
+
     if last_known and av_transport is None:
         dev, avt, rc, location = last_known
         device = dev
@@ -1006,11 +1016,11 @@ async def auto_advance_loop():
 
 
 async def keepalive_loop():
-    """Ping the connected device every 30s to prevent it from sleeping.
+    """Ping the connected device every 15s to prevent it from sleeping.
     If the ping fails, mark the device as disconnected so discovery can reconnect."""
     global av_transport, rendering_control
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(15)
         if not _device_ready():
             continue
         try:
