@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+async-upnp-client
+yt-dlp
+httpx
+python-multipart
+imageio-ffmpeg
+pytest
+pytest-asyncio

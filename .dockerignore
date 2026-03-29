@@ -1,0 +1,15 @@
+venv/
+cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+.gstack/
+.github/
+CLAUDE.md
+LICENSE
+README.md
+test_app.py
+docker-compose.yml
+.git/
+.gitignore
+.dockerignore

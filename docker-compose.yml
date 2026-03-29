@@ -1,0 +1,7 @@
+services:
+  bulb-voice:
+    build: .
+    network_mode: host
+    volumes:
+      - ./cache:/app/cache
+    restart: unless-stopped

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0a0f">
+  <title>Bulb Voice</title>
+  <link rel="stylesheet" href="/static/style.css?v=4">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Bulb Voice</h1>
+      <div class="header-right">
+        <button id="btn-devices" class="device-btn" title="Switch speaker">
+          <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M17 2H7c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 18H7V4h10v16zm-5-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm-3-8h6v2H9v-2z"/></svg>
+          <span id="device-name">--</span>
+        </button>
+        <span id="device-status" class="status offline">offline</span>
+      </div>
+    </header>
+
+    <!-- Device picker (hidden by default) -->
+    <section id="device-picker" class="device-picker hidden">
+      <div class="picker-header">
+        <h3>Speakers</h3>
+        <button id="btn-refresh-devices" class="picker-refresh">Scan</button>
+      </div>
+      <ul id="device-list"></ul>
+    </section>
+
+    <section class="now-playing">
+      <div class="track-info">
+        <div id="track-title" class="title">No track</div>
+        <div id="track-artist" class="artist"></div>
+      </div>
+      <div class="progress-wrap">
+        <span id="pos-current">0:00</span>
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <span id="pos-duration">0:00</span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="btn-prev" class="ctrl-btn" title="Previous">
+        <svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+      </button>
+      <button id="btn-play" class="ctrl-btn play-btn" title="Play">
+        <svg id="icon-play" viewBox="0 0 24 24" width="36" height="36"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+        <svg id="icon-pause" viewBox="0 0 24 24" width="36" height="36" style="display:none"><path fill="currentColor" d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
+      </button>
+      <button id="btn-next" class="ctrl-btn" title="Next">
+        <svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+      </button>
+      <button id="btn-stop" class="ctrl-btn" title="Stop">
+        <svg viewBox="0 0 24 24" width="24" height="24"><rect fill="currentColor" x="6" y="6" width="12" height="12" rx="1"/></svg>
+      </button>
+      <button id="btn-mode" class="ctrl-btn mode-btn" title="Play mode">
+        <svg id="icon-mode-normal" viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 4h18v2H3zm0 7h12v2H3zm0 7h18v2H3z"/></svg>
+        <svg id="icon-mode-repeat" viewBox="0 0 24 24" width="22" height="22" style="display:none"><path fill="currentColor" d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+        <svg id="icon-mode-repeat1" viewBox="0 0 24 24" width="22" height="22" style="display:none"><path fill="currentColor" d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/><text x="12" y="15" text-anchor="middle" font-size="7" fill="currentColor" font-weight="bold">1</text></svg>
+        <svg id="icon-mode-shuffle" viewBox="0 0 24 24" width="22" height="22" style="display:none"><path fill="currentColor" d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm-.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.79-3.13z"/></svg>
+      </button>
+    </section>
+
+    <section class="volume-section">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+      <input type="range" id="volume-slider" min="0" max="100" value="30">
+      <span id="volume-val">30</span>
+    </section>
+
+    <section class="add-section">
+      <form id="add-form">
+        <input type="text" id="url-input" placeholder="Search YouTube or paste URL" autocomplete="off" autocapitalize="off">
+        <button type="submit" id="btn-add">
+          <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        </button>
+      </form>
+      <div id="download-progress" class="dl-progress hidden">
+        <div class="dl-header">
+          <span id="dl-text">Downloading...</span>
+          <span id="dl-count"></span>
+        </div>
+        <div class="dl-bar"><div id="dl-fill" class="dl-fill"></div></div>
+        <ul id="dl-tracks"></ul>
+      </div>
+    </section>
+
+    <!-- Search results (hidden by default) -->
+    <section id="search-results" class="search-results hidden">
+      <div class="search-header">
+        <h3 id="search-title">Results</h3>
+        <button id="btn-close-search" class="search-close">&times;</button>
+      </div>
+      <ul id="result-list"></ul>
+    </section>
+
+    <section class="queue-section">
+      <h2>Queue <span id="queue-count"></span></h2>
+      <ul id="queue-list"></ul>
+    </section>
+
+    <section class="log-section">
+      <button id="btn-toggle-logs" class="log-toggle">Logs</button>
+      <div id="log-panel" class="log-panel hidden">
+        <ul id="log-list"></ul>
+      </div>
+    </section>
+  </div>
+
+  <script src="/static/app.js?v=4"></script>
+</body>
+</html>
