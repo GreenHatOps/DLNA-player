@@ -1015,8 +1015,8 @@ async def keepalive_loop():
             continue
         try:
             await dlna_get_transport_state()
-        except Exception:
-            log.warning("Device keepalive failed, marking disconnected for rediscovery")
+        except Exception as e:
+            log.warning("Device keepalive failed, marking disconnected: %s", e)
             av_transport = None
             rendering_control = None
 
