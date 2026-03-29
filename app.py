@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -16,9 +18,13 @@ from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from typing import TYPE_CHECKING
+
 from async_upnp_client.aiohttp import AiohttpRequester
 from async_upnp_client.client_factory import UpnpFactory
-from async_upnp_client.client import UpnpDevice, UpnpService
+
+if TYPE_CHECKING:
+    from async_upnp_client.client import UpnpDevice, UpnpService
 
 # ---------------------------------------------------------------------------
 # Config
@@ -228,7 +234,7 @@ discovered_devices: dict[str, dict] = {}  # {friendly_name: {url, name, model}}
 
 async def discover_and_connect():
     """Use SSDP to find DLNA MediaRenderers on the network."""
-    global av_transport, rendering_control, device, discovered_devices
+    global av_transport, rendering_control, device
 
     from async_upnp_client.search import async_search
 
@@ -654,7 +660,6 @@ async def api_device_select(req: DeviceSelectRequest):
 async def api_devices_refresh():
     """Re-scan the network for DLNA devices."""
     global av_transport, rendering_control
-    old_name = device.friendly_name if device else None
     av_transport = None
     rendering_control = None
     discovered_devices.clear()
