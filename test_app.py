@@ -1,8 +1,11 @@
 """Unit tests for Bulb Voice — pure logic, no DLNA device required."""
 import json
+import time
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
+
+import pytest
 
 # Import the module under test
 import app
@@ -315,3 +318,93 @@ class TestIsDuplicate:
             id="1", title="T", artist="A", source_type="radio",
             source_url="http://stream.radio.com/live"))
         assert app._is_duplicate("http://stream.radio.com/live") is True
+
+
+# ---------------------------------------------------------------------------
+# DownloadProgress
+# ---------------------------------------------------------------------------
+
+class TestDownloadProgress:
+    def test_default_values(self):
+        dp = app.DownloadProgress()
+        assert dp.total == 0
+        assert dp.done == 0
+        assert dp.current_title == ""
+        assert dp.track_ids == []
+        assert dp.started_at == 0.0
+
+    def test_with_started_at(self):
+        now = time.time()
+        dp = app.DownloadProgress(total=5, done=2, started_at=now,
+                                  track_ids=["a", "b", "c", "d", "e"])
+        assert dp.total == 5
+        assert dp.done == 2
+        assert dp.started_at == now
+        assert len(dp.track_ids) == 5
+
+    def test_elapsed_calculation(self):
+        dp = app.DownloadProgress(total=3, done=1, started_at=time.time() - 10)
+        elapsed = time.time() - dp.started_at
+        assert 9.5 < elapsed < 11
+
+
+# ---------------------------------------------------------------------------
+# _nudge_device
+# ---------------------------------------------------------------------------
+
+class TestNudgeDevice:
+    @pytest.mark.asyncio
+    async def test_nudge_does_not_raise_on_failure(self):
+        """_nudge_device should silently swallow errors."""
+        await app._nudge_device("http://192.168.1.254:9999/nonexistent")
+        # No exception = pass
+
+    @pytest.mark.asyncio
+    async def test_nudge_with_empty_url(self):
+        await app._nudge_device("")
+        # No exception = pass
+
+
+# ---------------------------------------------------------------------------
+# State persistence with new fields
+# ---------------------------------------------------------------------------
+
+class TestStatePersistenceNewFields:
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.state_file = Path(self.tmpdir) / "state.json"
+        self.original_state_file = app.STATE_FILE
+        app.STATE_FILE = self.state_file
+        app.state.queue.clear()
+        app.state.current_index = -1
+        app.state.volume = 30
+        app.state.last_device = ""
+        app.state.last_device_url = ""
+
+    def teardown_method(self):
+        app.STATE_FILE = self.original_state_file
+        app.state.queue.clear()
+        app.state.current_index = -1
+        app.state.volume = 30
+        app.state.last_device = ""
+        app.state.last_device_url = ""
+
+    def test_save_and_load_last_device(self):
+        app.state.last_device = "Office-Bulb"
+        app.state.last_device_url = "http://192.168.1.49:8080/description.xml"
+        app._save_state()
+
+        app.state.last_device = ""
+        app.state.last_device_url = ""
+        app._load_state()
+
+        assert app.state.last_device == "Office-Bulb"
+        assert app.state.last_device_url == "http://192.168.1.49:8080/description.xml"
+
+    def test_load_old_state_without_last_device(self):
+        """State files from before last_device was added should load gracefully."""
+        data = {"current_index": -1, "volume": 30, "queue": []}
+        self.state_file.write_text(json.dumps(data))
+        app._load_state()
+        assert app.state.last_device == ""
+        assert app.state.last_device_url == ""

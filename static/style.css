@@ -455,6 +455,16 @@ header h1 {
 
 .result-item .r-add:disabled { opacity: 0.5; }
 
+.r-spinner {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border: 2.5px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
 .search-empty {
   color: var(--text2);
   font-size: 0.85rem;

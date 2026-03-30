@@ -96,6 +96,7 @@ class DownloadProgress:
     done: int = 0
     current_title: str = ""
     track_ids: list[str] = field(default_factory=list)  # IDs of tracks in this batch
+    started_at: float = 0.0  # time.time() when download batch started
 
 
 @dataclass
@@ -193,17 +194,41 @@ class PlayModeRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_state()
+    # Immediately nudge last device to prevent deep sleep during restart gap
+    if state.last_device_url:
+        asyncio.create_task(_nudge_device(state.last_device_url))
     asyncio.create_task(connect_loop())
     asyncio.create_task(auto_advance_loop())
     asyncio.create_task(keepalive_loop())
     log.info("Server at %s", BASE_URL)
     log.info("Open on your phone: %s", BASE_URL)
     yield
+    # Ping device repeatedly before shutdown to keep it awake for restart
+    if state.last_device_url:
+        for _ in range(3):
+            await _nudge_device(state.last_device_url)
+            await asyncio.sleep(1)
     _save_state()
+
+
+async def _nudge_device(url: str):
+    """Send a lightweight HTTP GET to keep the device's WiFi stack awake."""
+    try:
+        async with httpx.AsyncClient(timeout=3) as client:
+            await client.get(url)
+    except Exception:
+        pass
 
 
 async def connect_loop():
     """Discover DLNA renderers via SSDP and connect to the first one found."""
+    # On first run, try direct connect to last device (faster than SSDP)
+    if av_transport is None and state.last_device_url:
+        try:
+            log.info("Fast reconnect to %s", state.last_device_url)
+            await connect_to_device(state.last_device_url)
+        except Exception as e:
+            log.debug("Fast reconnect failed, falling back to SSDP: %s", e)
     while True:
         try:
             if av_transport is None:
@@ -276,14 +301,17 @@ async def discover_and_connect():
                 elif state.last_device_url and location == state.last_device_url:
                     last_known = (dev, avt, rc, location)
         except Exception as e:
-            log.debug("Skipping %s: %s", location, e)
+            log.debug("Device probe failed for %s: %s", location, e)
 
     # If name/URL match didn't work (device half-awake), try connecting by URL directly
     if not last_known and av_transport is None and state.last_device_url:
-        if state.last_device_url in found:
+        # Match by IP, not exact URL (SSDP may return different paths)
+        last_ip = state.last_device_url.split("//")[1].split("/")[0].split(":")[0]
+        matching_url = next((loc for loc in found if last_ip in loc), None)
+        if matching_url:
             try:
-                log.info("Retrying direct connect to %s", state.last_device_url)
-                await connect_to_device(state.last_device_url)
+                log.info("Retrying direct connect to %s (matched via IP)", matching_url)
+                await connect_to_device(matching_url)
                 return
             except Exception as e:
                 log.debug("Direct reconnect failed: %s", e)
@@ -753,7 +781,10 @@ async def queue_add(req: AddRequest):
 
     if source_type == "youtube":
         track_id = str(uuid.uuid4())[:8]
-        state.download = DownloadProgress(total=1, done=0, current_title="Downloading...")
+        state.download = DownloadProgress(
+            total=1, done=0, current_title="Downloading...",
+            track_ids=[track_id], started_at=time.time(),
+        )
         info = await download_youtube(req.url, track_id)
         state.download = DownloadProgress()  # clear
         track = Track(
@@ -794,7 +825,7 @@ async def _download_playlist_tracks(tracks: list[Track], play_first: bool = Fals
     """Download playlist tracks sequentially in the background."""
     state.download = DownloadProgress(
         total=len(tracks), done=0, current_title="",
-        track_ids=[t.id for t in tracks],
+        track_ids=[t.id for t in tracks], started_at=time.time(),
     )
     for i, track in enumerate(tracks):
         state.download.current_title = track.title
@@ -955,9 +986,11 @@ async def api_status():
                         None
                     ),
                 })
+        elapsed = time.time() - dl.started_at if dl.started_at else 0
         download = {
             "total": dl.total, "done": dl.done,
             "current": dl.current_title, "tracks": dl_tracks,
+            "elapsed": round(elapsed),
         }
 
     return {
@@ -1003,8 +1036,16 @@ async def auto_advance_loop():
                     try:
                         await _play_current()
                     except Exception as e:
-                        log.error("Auto-advance play failed: %s. Retrying in 3s...", e)
-                        await asyncio.sleep(3)
+                        log.error("Auto-advance play failed: %s. Waiting for device...", e)
+                        # Wait for TRANSITIONING to clear before retry
+                        for _ in range(5):
+                            await asyncio.sleep(2)
+                            try:
+                                ts2 = await dlna_get_transport_state()
+                                if ts2 != "TRANSITIONING":
+                                    break
+                            except Exception:
+                                pass
                         try:
                             await _play_current()
                         except Exception as e2:
@@ -1017,18 +1058,36 @@ async def auto_advance_loop():
 
 async def keepalive_loop():
     """Ping the connected device every 15s to prevent it from sleeping.
-    If the ping fails, mark the device as disconnected so discovery can reconnect."""
+    Retries up to 3 times before marking disconnected.  When disconnected,
+    nudges the device with a raw HTTP GET to its description URL so it stays
+    on Wi-Fi long enough for SSDP rediscovery."""
     global av_transport, rendering_control
+    fail_count = 0
+    max_failures = 3
     while True:
         await asyncio.sleep(15)
-        if not _device_ready():
-            continue
-        try:
-            await dlna_get_transport_state()
-        except Exception as e:
-            log.warning("Device keepalive failed, marking disconnected: %s", e)
-            av_transport = None
-            rendering_control = None
+        if _device_ready():
+            try:
+                await dlna_get_transport_state()
+                fail_count = 0
+            except Exception as e:
+                fail_count += 1
+                log.warning("Device keepalive failed (%d/%d): %s",
+                            fail_count, max_failures, e)
+                if fail_count >= max_failures:
+                    log.warning("Device unresponsive after %d pings, "
+                                "marking disconnected", max_failures)
+                    av_transport = None
+                    rendering_control = None
+                    fail_count = 0
+        elif state.last_device_url:
+            # Device disconnected — nudge it with a lightweight HTTP request
+            # to prevent it from going into deep sleep before SSDP finds it.
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    await client.get(state.last_device_url)
+            except Exception:
+                pass  # best-effort; device may already be asleep
 
 
 # ---------------------------------------------------------------------------

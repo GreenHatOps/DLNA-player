@@ -170,8 +170,23 @@ function renderDownload(dl) {
   }
 
   wrap.classList.remove("hidden");
-  text.textContent = dl.total === 1 ? "Downloading..." : "Playlist downloading";
-  count.textContent = `${dl.done}/${dl.total}`;
+  const current = dl.current || "";
+  if (dl.total === 1) {
+    text.textContent = current || "Downloading...";
+  } else {
+    text.textContent = current || "Playlist downloading";
+  }
+
+  // Time remaining estimate
+  let eta = "";
+  if (dl.elapsed > 0 && dl.done > 0 && dl.done < dl.total) {
+    const perTrack = dl.elapsed / dl.done;
+    const remaining = Math.round(perTrack * (dl.total - dl.done));
+    eta = remaining >= 60
+      ? ` \u2022 ~${Math.ceil(remaining / 60)}m left`
+      : ` \u2022 ~${remaining}s left`;
+  }
+  count.textContent = dl.total === 1 ? (eta || "") : `${dl.done}/${dl.total}${eta}`;
   const pct = dl.total > 0 ? (dl.done / dl.total) * 100 : 0;
   fill.style.width = `${pct}%`;
 
@@ -236,13 +251,13 @@ async function doSearch(query) {
         e.stopPropagation();
         const btn = e.currentTarget;
         btn.disabled = true;
-        btn.textContent = "...";
+        btn.innerHTML = '<span class="r-spinner"></span>';
         try {
           const res = await api("POST", "/queue/add", { url: r.url });
-          btn.textContent = res.duplicate ? "\u2022" : "\u2713";
+          btn.innerHTML = res.duplicate ? "\u2022" : "\u2713";
           if (res.duplicate) btn.title = "Already in queue";
         } catch {
-          btn.textContent = "!";
+          btn.innerHTML = "!";
         }
       });
 
