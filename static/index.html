@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#0a0a0f">
   <title>Bulb Voice</title>
-  <link rel="stylesheet" href="/static/style.css?v=6">
+  <link rel="stylesheet" href="/static/style.css?v=7">
 </head>
 <body>
   <div class="app">
@@ -100,8 +100,9 @@
     </section>
 
     <section class="queue-section">
-      <h2>Queue <span id="queue-count"></span></h2>
+      <h2>Queue <span id="queue-count"></span><span id="queue-pos"></span></h2>
       <ul id="queue-list"></ul>
+      <div id="queue-scroll" class="hidden"><div id="queue-scroll-thumb"></div></div>
     </section>
 
     <section class="log-section">
@@ -112,6 +113,6 @@
     </section>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>

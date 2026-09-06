@@ -29,6 +29,9 @@ const els = {
   btnCloseSearch: $("#btn-close-search"),
   queueList: $("#queue-list"),
   queueCount: $("#queue-count"),
+  queuePos: $("#queue-pos"),
+  queueScroll: $("#queue-scroll"),
+  queueScrollThumb: $("#queue-scroll-thumb"),
 };
 
 let isPlaying = false;
@@ -178,6 +181,7 @@ function renderQueue(queue, currentIdx) {
   });
 
   els.queueList.scrollLeft = scrollLeft;
+  updateQueuePos();
 
   // Bring the playing card into view when the track changes (not on every poll,
   // so it never fights the user's own scrolling)
@@ -194,6 +198,47 @@ function scrollQueueToActive() {
   const left = active.offsetLeft - (list.clientWidth - active.offsetWidth) / 2;
   list.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
 }
+
+// Position indicator: "41–42 / 123" for the cards currently in view, plus a
+// thin track whose thumb is the visible slice of the whole strip.
+function updateQueuePos() {
+  const list = els.queueList;
+  const cards = list.children;
+  const n = cards.length;
+  if (!n || list.scrollWidth <= list.clientWidth + 1) {
+    els.queuePos.textContent = "";
+    els.queueScroll.classList.add("hidden");
+    return;
+  }
+  const left = list.scrollLeft;
+  const right = left + list.clientWidth;
+  let first = -1, last = -1;
+  for (let i = 0; i < n; i++) {
+    const c = cards[i];
+    const mid = c.offsetLeft + c.offsetWidth / 2;
+    if (mid >= left && mid <= right) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0) first = last = Math.min(n - 1, Math.round(left / (list.scrollWidth / n)));
+  els.queuePos.textContent = first === last ? `${first + 1} / ${n}` : `${first + 1}–${last + 1} / ${n}`;
+
+  const frac = list.clientWidth / list.scrollWidth;
+  const trackW = els.queueScroll.clientWidth;
+  const thumbW = Math.max(12, frac * trackW);
+  const x = (left / (list.scrollWidth - list.clientWidth)) * (trackW - thumbW);
+  els.queueScrollThumb.style.width = `${thumbW}px`;
+  els.queueScrollThumb.style.transform = `translateX(${x}px)`;
+  els.queueScroll.classList.remove("hidden");
+}
+
+let posRaf = 0;
+els.queueList.addEventListener("scroll", () => {
+  if (posRaf) return;
+  posRaf = requestAnimationFrame(() => { posRaf = 0; updateQueuePos(); });
+}, { passive: true });
+window.addEventListener("resize", updateQueuePos);
 
 // Mouse wheel over the strip scrolls it sideways
 els.queueList.addEventListener("wheel", (e) => {

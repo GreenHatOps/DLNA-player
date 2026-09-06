@@ -214,7 +214,35 @@ header h1 {
   margin-bottom: 10px;
 }
 
+.queue-section h2 { display: flex; align-items: baseline; gap: 6px; }
 #queue-count { font-weight: 400; }
+#queue-pos {
+  margin-left: auto;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Thin scroll track under the card strip: thumb = visible slice of the queue */
+#queue-scroll {
+  position: relative;
+  height: 3px;
+  margin: 2px 2px 0;
+  background: var(--surface2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+#queue-scroll-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 20%;
+  background: var(--accent);
+  border-radius: 2px;
+  transform: translateX(0);
+}
 
 #queue-list {
   /* Horizontal strip of business-card-ratio cards; scroll with wheel/swipe */
