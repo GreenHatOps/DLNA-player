@@ -29,6 +29,8 @@ const els = {
   btnCloseSearch: $("#btn-close-search"),
   queueList: $("#queue-list"),
   queueCount: $("#queue-count"),
+  queueStage: $("#queue-stage"),
+  queueSpacer: $("#queue-spacer"),
   queuePos: $("#queue-pos"),
   queueScroll: $("#queue-scroll"),
   queueScrollThumb: $("#queue-scroll-thumb"),
@@ -136,11 +138,28 @@ async function poll() {
   }
 }
 
-// --- Queue ---
-// Cards are rebuilt only when the queue changes (the status poll runs every
-// 2s), so the horizontal scroll position survives between polls.
+// --- Queue (Rolodex) ---
+// #queue-list scrolls vertically over an invisible spacer; the fractional
+// scroll position picks the focused card.  Only the cards near the focus
+// are in the DOM (the queue can hold hundreds).  Each card is hinged on
+// the rod: later cards hang beneath and bend away, earlier cards sit above
+// the rod and bend back.
+const CARD_H = 104;      // px, must match .queue-item height
+const ROD_Y = 76;        // px from stage top where the rod sits
+const STEP = 56;         // px of scroll per card
+const NEAR = 5;          // cards rendered on each side of the focus
+
+let queueItems = [];
 let queueSig = "";
 let lastCurrentIdx = -1;
+let activeIdx = -1;
+const cardEls = new Map();   // queue index -> element
+
+function queuePos() {
+  const n = queueItems.length;
+  if (!n) return 0;
+  return Math.min(n - 1, Math.max(0, els.queueList.scrollTop / STEP));
+}
 
 function renderQueue(queue, currentIdx) {
   els.queueCount.textContent = queue.length ? `(${queue.length})` : "";
@@ -149,104 +168,126 @@ function renderQueue(queue, currentIdx) {
   if (sig === queueSig) return;
   queueSig = sig;
 
-  const scrollLeft = els.queueList.scrollLeft;
-  els.queueList.innerHTML = "";
+  queueItems = queue;
+  activeIdx = currentIdx;
+  els.queueSpacer.style.height = `${Math.max(0, queue.length - 1) * STEP}px`;
+  els.queueList.classList.toggle("is-empty", queue.length === 0);
+  cardEls.forEach((el) => el.remove());
+  cardEls.clear();
+  layoutCards();
 
-  queue.forEach((track, i) => {
-    const li = document.createElement("li");
-    li.className = "queue-item" + (i === currentIdx ? " active" : "");
-
-    const statusBadge = track.ready ? "" : '<span class="q-dl">downloading</span>';
-    li.innerHTML = `
-      <div class="q-idx">${i + 1}</div>
-      <div class="q-title">${esc(track.title)}</div>
-      <div class="q-artist">${esc(track.artist)}</div>
-      <div class="q-bottom">
-        <span class="q-dur">${fmt(track.duration)}</span>
-        ${statusBadge}
-      </div>
-      <button class="q-remove" data-id="${track.id}" title="Remove">&times;</button>
-    `;
-
-    li.addEventListener("click", () => {
-      send("POST", "/play", { track_id: track.id });
-    });
-
-    li.querySelector(".q-remove").addEventListener("click", (e) => {
-      e.stopPropagation();
-      send("DELETE", `/queue/${track.id}`);
-    });
-
-    els.queueList.appendChild(li);
-  });
-
-  els.queueList.scrollLeft = scrollLeft;
-  updateQueuePos();
-
-  // Bring the playing card into view when the track changes (not on every poll,
-  // so it never fights the user's own scrolling)
+  // Bring the playing card to the front when the track changes (not on every
+  // poll, so it never fights the user's own scrolling)
   if (currentIdx !== lastCurrentIdx) {
     lastCurrentIdx = currentIdx;
     scrollQueueToActive();
   }
 }
 
-function scrollQueueToActive() {
-  const active = els.queueList.querySelector(".queue-item.active");
-  if (!active) return;
-  const list = els.queueList;
-  const left = active.offsetLeft - (list.clientWidth - active.offsetWidth) / 2;
-  list.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+function makeCard(i) {
+  const track = queueItems[i];
+  const el = document.createElement("div");
+  el.className = "queue-item" + (i === activeIdx ? " active" : "");
+  const statusBadge = track.ready ? "" : '<span class="q-dl">downloading</span>';
+  el.innerHTML = `
+    <div class="q-idx">${i + 1}</div>
+    <div class="q-title">${esc(track.title)}</div>
+    <div class="q-artist">${esc(track.artist)}</div>
+    <div class="q-bottom">
+      <span class="q-dur">${fmt(track.duration)}</span>
+      ${statusBadge}
+    </div>
+    <button class="q-remove" data-id="${track.id}" title="Remove">&times;</button>
+  `;
+  el.addEventListener("click", () => {
+    // Tap the front card to play it; tap a bent card to flip to it
+    if (Math.round(queuePos()) === i) send("POST", "/play", { track_id: track.id });
+    else scrollQueueTo(i);
+  });
+  el.querySelector(".q-remove").addEventListener("click", (e) => {
+    e.stopPropagation();
+    send("DELETE", `/queue/${track.id}`);
+  });
+  return el;
 }
 
-// Position indicator: "41–42 / 123" for the cards currently in view, plus a
-// thin track whose thumb is the visible slice of the whole strip.
+function layoutCards() {
+  const n = queueItems.length;
+  if (!n) { updateQueuePos(); return; }
+  const pos = queuePos();
+  const focus = Math.round(pos);
+  const lo = Math.max(0, Math.floor(pos) - NEAR);
+  const hi = Math.min(n - 1, Math.ceil(pos) + NEAR);
+
+  for (const [i, el] of cardEls) {
+    if (i < lo || i > hi) { el.remove(); cardEls.delete(i); }
+  }
+
+  for (let i = lo; i <= hi; i++) {
+    let el = cardEls.get(i);
+    if (!el) { el = makeCard(i); cardEls.set(i, el); els.queueStage.appendChild(el); }
+
+    const d = i - pos;
+    const a = Math.abs(d);
+    const theta = 74 * Math.tanh(1.0 * a);                 // hinge angle: ~56deg at d=1, saturates ~74deg
+    const shift = 0.75 * CARD_H * Math.min(a, 1) + 22 * Math.max(0, a - 1);
+    const depth = -(30 * Math.min(a, 1) + 10 * Math.max(0, a - 1));
+    let top, origin, rot;
+    if (d >= 0) {            // hangs beneath the rod, bottom bends away
+      top = ROD_Y + shift; origin = "top center"; rot = -theta;
+    } else {                 // sits above the rod, top bends back
+      top = ROD_Y - shift; origin = "bottom center"; rot = theta;
+    }
+    el.style.top = `${top.toFixed(1)}px`;
+    el.style.transformOrigin = origin;
+    el.style.transform = `translateZ(${depth.toFixed(1)}px) rotateX(${rot.toFixed(2)}deg)`;
+    el.style.zIndex = String(100 - Math.round(a * 10));
+    el.style.opacity = String(Math.max(0.6, 1 - 0.1 * a));
+    el.classList.toggle("focus", i === focus);
+  }
+  updateQueuePos();
+}
+
+function scrollQueueTo(i, smooth = true) {
+  els.queueList.scrollTo({ top: i * STEP, behavior: smooth ? "smooth" : "auto" });
+}
+
+function scrollQueueToActive() {
+  if (activeIdx >= 0) scrollQueueTo(activeIdx);
+}
+
+// Position indicator: "42 / 123" for the front card, plus a thin track whose
+// thumb shows how far through the deck you are.
 function updateQueuePos() {
-  const list = els.queueList;
-  const cards = list.children;
-  const n = cards.length;
-  if (!n || list.scrollWidth <= list.clientWidth + 1) {
+  const n = queueItems.length;
+  if (n < 2) {
     els.queuePos.textContent = "";
     els.queueScroll.classList.add("hidden");
     return;
   }
-  const left = list.scrollLeft;
-  const right = left + list.clientWidth;
-  let first = -1, last = -1;
-  for (let i = 0; i < n; i++) {
-    const c = cards[i];
-    const mid = c.offsetLeft + c.offsetWidth / 2;
-    if (mid >= left && mid <= right) {
-      if (first < 0) first = i;
-      last = i;
-    }
-  }
-  if (first < 0) first = last = Math.min(n - 1, Math.round(left / (list.scrollWidth / n)));
-  els.queuePos.textContent = first === last ? `${first + 1} / ${n}` : `${first + 1}–${last + 1} / ${n}`;
-
-  const frac = list.clientWidth / list.scrollWidth;
+  const pos = queuePos();
+  els.queuePos.textContent = `${Math.round(pos) + 1} / ${n}`;
   const trackW = els.queueScroll.clientWidth;
-  const thumbW = Math.max(12, frac * trackW);
-  const x = (left / (list.scrollWidth - list.clientWidth)) * (trackW - thumbW);
+  const thumbW = Math.max(12, trackW / n);
+  const x = (pos / (n - 1)) * (trackW - thumbW);
   els.queueScrollThumb.style.width = `${thumbW}px`;
   els.queueScrollThumb.style.transform = `translateX(${x}px)`;
   els.queueScroll.classList.remove("hidden");
 }
 
-let posRaf = 0;
+// Scroll drives the deck; when scrolling stops, settle on the nearest card
+let layoutRaf = 0;
+let snapTimer = null;
 els.queueList.addEventListener("scroll", () => {
-  if (posRaf) return;
-  posRaf = requestAnimationFrame(() => { posRaf = 0; updateQueuePos(); });
+  if (!layoutRaf) layoutRaf = requestAnimationFrame(() => { layoutRaf = 0; layoutCards(); });
+  clearTimeout(snapTimer);
+  snapTimer = setTimeout(() => {
+    const pos = queuePos();
+    const i = Math.round(pos);
+    if (Math.abs(pos - i) > 0.02) scrollQueueTo(i);
+  }, 120);
 }, { passive: true });
-window.addEventListener("resize", updateQueuePos);
-
-// Mouse wheel over the strip scrolls it sideways
-els.queueList.addEventListener("wheel", (e) => {
-  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
-    e.preventDefault();
-    els.queueList.scrollLeft += e.deltaY;
-  }
-}, { passive: false });
+window.addEventListener("resize", () => layoutCards());
 
 // --- Download progress ---
 function renderDownload(dl) {
