@@ -6,6 +6,7 @@ import logging
 import socket
 import uuid
 import time
+from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,6 +95,7 @@ class Track:
 class DownloadProgress:
     total: int = 0
     done: int = 0
+    failed: int = 0
     current_title: str = ""
     track_ids: list[str] = field(default_factory=list)  # IDs of tracks in this batch
     started_at: float = 0.0  # time.time() when download batch started
@@ -321,10 +323,7 @@ async def discover_and_connect():
         device = dev
         av_transport = avt
         rendering_control = rc
-        try:
-            state.volume = await dlna_get_volume()
-        except Exception as e:
-            log.debug("GetVolume not supported on %s: %s", dev.friendly_name, e)
+        await _sync_device_volume(restore=True)
         log.info("Reconnected to last device: %s (%s)", dev.friendly_name, location)
     elif av_transport is None and discovered_devices:
         names = ", ".join(discovered_devices.keys())
@@ -339,17 +338,135 @@ async def connect_to_device(description_url: str):
     device = await factory.async_create_device(description_url)
     av_transport = device.service("urn:schemas-upnp-org:service:AVTransport:1")
     rendering_control = device.service("urn:schemas-upnp-org:service:RenderingControl:1")
-    try:
-        state.volume = await dlna_get_volume()
-    except Exception as e:
-        log.debug("GetVolume not supported on %s: %s", device.friendly_name, e)
+    # Same device as last time (possibly rebooted, renamed to "unknown", or
+    # found under a different description path) -> restore our saved volume.
+    # A different device -> adopt whatever level it is currently at.
+    await _sync_device_volume(restore=_is_last_device(device.friendly_name, description_url))
     state.last_device = device.friendly_name
     state.last_device_url = description_url
     _save_state()
     log.info("Connected to: %s", device.friendly_name)
 
 
+def _device_host(url: str) -> str:
+    """Host (IP) part of a description URL, or "" if unparseable."""
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def _is_last_device(friendly_name: str, description_url: str) -> bool:
+    """True if this looks like the device we were connected to last time.
+    Matches by friendly name, exact description URL, or host IP (the CY920
+    renames itself to "unknown" after a power cycle and SSDP may return a
+    different description path)."""
+    if state.last_device and friendly_name == state.last_device:
+        return True
+    if state.last_device_url:
+        if description_url == state.last_device_url:
+            return True
+        last_host = _device_host(state.last_device_url)
+        if last_host and last_host == _device_host(description_url):
+            return True
+    return False
+
+
+VOLUME_SYNC_GRACE = 5.0  # skip keepalive volume adoption this long after we set it
+VOLUME_RESET_LEVEL = 100  # the CY920 resets its DLNA volume to this after a reboot
+_volume_set_ts = 0.0  # time.monotonic() of the last SetVolume we issued
+_volume_push_pending = False  # SetVolume failed; retry on next play/keepalive
+
+
+async def _push_volume() -> bool:
+    """Best-effort SetVolume(state.volume).  On failure, flags a retry for the
+    next play (some renderers reject SetVolume before a URI is set)."""
+    global _volume_push_pending, _volume_set_ts
+    try:
+        _volume_set_ts = time.monotonic()
+        await dlna_set_volume(state.volume)
+        _volume_push_pending = False
+        return True
+    except Exception as e:
+        _volume_push_pending = True
+        log.warning("Could not set volume to %d: %s (will retry on play)", state.volume, e)
+        return False
+
+
+async def _sync_device_volume(restore: bool):
+    """Reconcile app and device volume right after connecting.
+
+    restore=True  -> we are back on the last known device: push the saved
+                     volume.  The CY920 comes up at 100 after a power cycle or
+                     deep sleep, so the saved value is the truth, not the device.
+    restore=False -> user picked a different device: adopt its current level."""
+    global _volume_push_pending
+    _volume_push_pending = False
+    try:
+        dev_vol = int(await dlna_get_volume())
+    except Exception as e:
+        log.debug("GetVolume not supported: %s", e)
+        return
+    if dev_vol == state.volume:
+        return
+    if restore:
+        log.info("Device reports volume %d, restoring saved %d", dev_vol, state.volume)
+        await _push_volume()
+    else:
+        log.info("Adopting device volume %d (was %d)", dev_vol, state.volume)
+        state.volume = dev_vol
+
+
+async def _poll_device_volume(recovering: bool = False):
+    """Keepalive helper: keep the slider honest.
+
+    A mismatch is treated as a device *reset* (re-push our saved volume) when
+    the previous ping had failed (device likely rebooted faster than the
+    3-strike disconnect) or the device reports VOLUME_RESET_LEVEL.  Any other
+    mismatch is a change made outside the app (remote, other app) and is
+    adopted.  Skipped shortly after our own SetVolume to avoid racing it."""
+    if _volume_push_pending:
+        await _push_volume()
+        return
+    if time.monotonic() - _volume_set_ts < VOLUME_SYNC_GRACE:
+        return
+    try:
+        dev_vol = int(await dlna_get_volume())
+    except Exception as e:
+        log.debug("Keepalive GetVolume failed: %s", e)
+        return
+    # A SetVolume may have landed during the await above
+    if time.monotonic() - _volume_set_ts < VOLUME_SYNC_GRACE:
+        return
+    if dev_vol == state.volume:
+        return
+    if recovering or dev_vol == VOLUME_RESET_LEVEL:
+        log.info("Device volume reset to %d (saved %d), restoring", dev_vol, state.volume)
+        await _push_volume()
+    else:
+        log.info("Volume changed on device: %d -> %d", state.volume, dev_vol)
+        state.volume = dev_vol
+        _save_state()
+
+
+def _require_avt() -> UpnpService:
+    """Snapshot AVTransport; 503 if no device. Using the returned local
+    reference avoids a race with keepalive nulling the global mid-call."""
+    avt = av_transport
+    if avt is None:
+        raise HTTPException(status_code=503, detail="Device not connected")
+    return avt
+
+
+def _require_rc() -> UpnpService:
+    rc = rendering_control
+    if rc is None:
+        raise HTTPException(status_code=503, detail="Device not connected")
+    return rc
+
+
 async def dlna_set_uri(track: Track):
+    avt = _require_avt()
     stream_url = f"{BASE_URL}/stream/{track.id}"
     profile = _dlna_profile(track.content_type)
     size_attr = f' size="{track.content_length}"' if track.content_length else ''
@@ -365,43 +482,44 @@ async def dlna_set_uri(track: Track):
         f'{stream_url}</res>'
         '</item></DIDL-Lite>'
     )
-    action = av_transport.action("SetAVTransportURI")
+    action = avt.action("SetAVTransportURI")
     await action.async_call(InstanceID=0, CurrentURI=stream_url, CurrentURIMetaData=didl)
 
 
 async def dlna_play():
-    await av_transport.action("Play").async_call(InstanceID=0, Speed="1")
+    await _require_avt().action("Play").async_call(InstanceID=0, Speed="1")
 
 
 async def dlna_pause():
-    await av_transport.action("Pause").async_call(InstanceID=0)
+    await _require_avt().action("Pause").async_call(InstanceID=0)
 
 
 async def dlna_stop():
-    await av_transport.action("Stop").async_call(InstanceID=0)
+    await _require_avt().action("Stop").async_call(InstanceID=0)
 
 
 async def dlna_set_volume(level: int):
-    await rendering_control.action("SetVolume").async_call(
+    await _require_rc().action("SetVolume").async_call(
         InstanceID=0, Channel="Master", DesiredVolume=level
     )
 
 
 async def dlna_get_volume() -> int:
-    r = await rendering_control.action("GetVolume").async_call(InstanceID=0, Channel="Master")
+    r = await _require_rc().action("GetVolume").async_call(InstanceID=0, Channel="Master")
     return r.get("CurrentVolume", 0)
 
 
 async def dlna_get_position() -> dict:
-    r = await av_transport.action("GetPositionInfo").async_call(InstanceID=0)
+    r = await _require_avt().action("GetPositionInfo").async_call(InstanceID=0)
     return {
         "position": _parse_duration(r.get("RelTime", "0:00:00")),
         "duration": _parse_duration(r.get("TrackDuration", "0:00:00")),
+        "track_uri": r.get("TrackURI") or "",
     }
 
 
 async def dlna_get_transport_state() -> str:
-    r = await av_transport.action("GetTransportInfo").async_call(InstanceID=0)
+    r = await _require_avt().action("GetTransportInfo").async_call(InstanceID=0)
     return r.get("CurrentTransportState", "UNKNOWN")
 
 
@@ -410,13 +528,14 @@ async def dlna_seek(position_secs: int):
     m = (position_secs % 3600) // 60
     s = position_secs % 60
     target = f"{h}:{m:02d}:{s:02d}"
-    await av_transport.action("Seek").async_call(
+    await _require_avt().action("Seek").async_call(
         InstanceID=0, Unit="REL_TIME", Target=target
     )
 
 
 async def dlna_set_next_uri(track: Track):
     """Pre-load next track for gapless playback."""
+    avt = _require_avt()
     stream_url = f"{BASE_URL}/stream/{track.id}"
     profile = _dlna_profile(track.content_type)
     size_attr = f' size="{track.content_length}"' if track.content_length else ''
@@ -432,13 +551,13 @@ async def dlna_set_next_uri(track: Track):
         f'{stream_url}</res>'
         '</item></DIDL-Lite>'
     )
-    await av_transport.action("SetNextAVTransportURI").async_call(
+    await avt.action("SetNextAVTransportURI").async_call(
         InstanceID=0, NextURI=stream_url, NextURIMetaData=didl
     )
 
 
 async def dlna_set_play_mode(mode: str):
-    await av_transport.action("SetPlayMode").async_call(
+    await _require_avt().action("SetPlayMode").async_call(
         InstanceID=0, NewPlayMode=mode
     )
 
@@ -473,7 +592,7 @@ def _xml_escape(s: str) -> str:
 async def extract_playlist(url: str) -> list[dict]:
     """Extract metadata for all entries in a playlist/channel/single video."""
     proc = await asyncio.create_subprocess_exec(
-        "yt-dlp", "--flat-playlist", "--dump-json", url,
+        "yt-dlp", "--flat-playlist", "--dump-json", "--", url,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -512,7 +631,7 @@ async def download_youtube(url: str, track_id: str) -> dict:
         "--no-playlist",
         "--print-json",
         "-o", output_template,
-        url,
+        "--", url,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -646,7 +765,7 @@ async def api_search(req: SearchRequest):
     """Search YouTube via yt-dlp and return results."""
     query = f"ytsearch{req.max_results}:{req.query}"
     proc = await asyncio.create_subprocess_exec(
-        "yt-dlp", "--flat-playlist", "--dump-json", query,
+        "yt-dlp", "--flat-playlist", "--dump-json", "--", query,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -781,12 +900,20 @@ async def queue_add(req: AddRequest):
 
     if source_type == "youtube":
         track_id = str(uuid.uuid4())[:8]
-        state.download = DownloadProgress(
-            total=1, done=0, current_title="Downloading...",
-            track_ids=[track_id], started_at=time.time(),
-        )
-        info = await download_youtube(req.url, track_id)
-        state.download = DownloadProgress()  # clear
+        # Claim the progress card only if no playlist batch is using it
+        show_card = state.download.total == 0
+        if show_card:
+            state.download = DownloadProgress(
+                total=1, done=0, current_title="Downloading...",
+                track_ids=[track_id], started_at=time.time(),
+            )
+        try:
+            info = await download_youtube(req.url, track_id)
+        finally:
+            # Clear only if the card is still ours (a batch may have claimed it
+            # meanwhile); also clears on download failure instead of sticking.
+            if show_card and state.download.track_ids == [track_id]:
+                state.download = DownloadProgress()
         track = Track(
             id=track_id,
             title=info["title"],
@@ -821,13 +948,32 @@ async def queue_add(req: AddRequest):
     return {"ok": True, "track": _track_dict(track)}
 
 
+_batch_download_lock = asyncio.Lock()
+
+
 async def _download_playlist_tracks(tracks: list[Track], play_first: bool = False):
-    """Download playlist tracks sequentially in the background."""
+    """Download playlist tracks sequentially in the background.  Batches are
+    serialized via a lock so concurrent playlist adds don't compete for
+    bandwidth or clobber each other's progress card."""
+    async with _batch_download_lock:
+        await _run_playlist_batch(tracks, play_first)
+
+
+async def _run_playlist_batch(tracks: list[Track], play_first: bool):
+    # Tracks may have been removed from the queue while waiting for the lock
+    queued_ids = {t.id for t in state.queue}
+    tracks = [t for t in tracks if t.id in queued_ids]
+    if not tracks:
+        return
     state.download = DownloadProgress(
         total=len(tracks), done=0, current_title="",
         track_ids=[t.id for t in tracks], started_at=time.time(),
     )
+    started = not play_first
     for i, track in enumerate(tracks):
+        if not any(t.id == track.id for t in state.queue):
+            state.download.done = i + 1
+            continue  # removed from queue mid-batch; skip download
         state.download.current_title = track.title
         try:
             info = await download_youtube(track.source_url, track.id)
@@ -838,9 +984,17 @@ async def _download_playlist_tracks(tracks: list[Track], play_first: bool = Fals
             track.artist = info["artist"]
             track.duration = info["duration"]
 
-            if i == 0 and play_first and _device_ready():
+            # Start playback on the first track that actually downloads
+            # (earlier ones may have failed), unless something is already playing.
+            if not started and _device_ready():
+                started = True
                 try:
-                    await _play_current()
+                    ts = await dlna_get_transport_state()
+                    if ts in ("STOPPED", "NO_MEDIA_PRESENT"):
+                        idx = next((j for j, t in enumerate(state.queue) if t.id == track.id), None)
+                        if idx is not None:
+                            state.current_index = idx
+                            await _play_current()
                 except Exception as e:
                     log.warning("Auto-play first playlist track failed: %s", e)
 
@@ -849,8 +1003,29 @@ async def _download_playlist_tracks(tracks: list[Track], play_first: bool = Fals
             _save_state()
         except Exception as e:
             state.download.done = i + 1
+            state.download.failed += 1
             log.error("Failed to download %s: %s", track.source_url, e)
+            # Drop the failed track so it doesn't sit in the queue as
+            # "downloading" forever, and clean up any partial files.
+            f_idx = next((j for j, t in enumerate(state.queue) if t.id == track.id), None)
+            if f_idx is not None:
+                _drop_track_at(f_idx)
+            for p in CACHE_DIR.glob(f"{track.id}*"):
+                p.unlink(missing_ok=True)
+            _save_state()
     state.download = DownloadProgress()  # clear when done
+
+
+def _drop_track_at(idx: int) -> Track:
+    """Remove queue[idx], delete its cached file, and adjust current_index."""
+    track = state.queue.pop(idx)
+    if track.local_path and Path(track.local_path).exists():
+        Path(track.local_path).unlink(missing_ok=True)
+    if idx < state.current_index:
+        state.current_index -= 1
+    elif idx == state.current_index and state.current_index >= len(state.queue):
+        state.current_index = -1
+    return track
 
 
 @app.delete("/api/queue/{track_id}")
@@ -858,16 +1033,16 @@ async def queue_remove(track_id: str):
     idx = next((i for i, t in enumerate(state.queue) if t.id == track_id), None)
     if idx is None:
         raise HTTPException(status_code=404)
-    track = state.queue.pop(idx)
-    # Clean up cache file
-    if track.local_path and Path(track.local_path).exists():
-        Path(track.local_path).unlink(missing_ok=True)
-    if idx < state.current_index:
-        state.current_index -= 1
-    elif idx == state.current_index:
-        await dlna_stop()
-        if state.current_index >= len(state.queue):
-            state.current_index = -1
+    was_current = idx == state.current_index
+    _drop_track_at(idx)
+    if was_current:
+        # Stop playback best-effort: removal must succeed even if the
+        # device is offline or the stop fails.
+        _mark_user_stop()
+        try:
+            await dlna_stop()
+        except Exception as e:
+            log.warning("Stop after removing playing track failed: %s", e)
     return {"ok": True}
 
 
@@ -901,33 +1076,39 @@ async def api_pause():
 
 @app.post("/api/stop")
 async def api_stop():
+    _mark_user_stop()
     await dlna_stop()
     return {"ok": True}
 
 
 @app.post("/api/next")
 async def api_next():
-    if state.current_index < len(state.queue) - 1:
-        state.current_index += 1
-        await _play_current()
-        return {"ok": True}
-    return {"ok": False, "reason": "end of queue"}
+    next_idx = _get_next_index(manual=True)
+    if next_idx is None:
+        return {"ok": False, "reason": "end of queue"}
+    state.current_index = next_idx
+    await _play_current()
+    return {"ok": True}
 
 
 @app.post("/api/prev")
 async def api_prev():
-    if state.current_index > 0:
-        state.current_index -= 1
-        await _play_current()
-        return {"ok": True}
-    return {"ok": False, "reason": "start of queue"}
+    prev_idx = _get_prev_index()
+    if prev_idx is None:
+        return {"ok": False, "reason": "start of queue"}
+    state.current_index = prev_idx
+    await _play_current()
+    return {"ok": True}
 
 
 @app.post("/api/volume")
 async def api_volume(req: VolumeRequest):
+    global _volume_set_ts, _volume_push_pending
     level = max(0, min(100, req.level))
+    _volume_set_ts = time.monotonic()
     await dlna_set_volume(level)
     state.volume = level
+    _volume_push_pending = False
     return {"ok": True}
 
 
@@ -963,7 +1144,8 @@ async def api_status():
         position = await dlna_get_position()
     except Exception as e:
         log.debug("Status poll failed: %s", e)
-    # Volume is cached, updated only on connect and after volume API calls
+    # Volume is cached: refreshed on connect, after volume API calls, and by
+    # the keepalive loop (_poll_device_volume) -- not on every 2s status poll
 
     current = None
     if 0 <= state.current_index < len(state.queue):
@@ -988,7 +1170,7 @@ async def api_status():
                 })
         elapsed = time.time() - dl.started_at if dl.started_at else 0
         download = {
-            "total": dl.total, "done": dl.done,
+            "total": dl.total, "done": dl.done, "failed": dl.failed,
             "current": dl.current_title, "tracks": dl_tracks,
             "elapsed": round(elapsed),
         }
@@ -1018,6 +1200,47 @@ async def api_logs():
 # ---------------------------------------------------------------------------
 
 _last_transport_state = "STOPPED"
+_user_stop_ts = 0.0  # time.monotonic() of last user-initiated stop
+_uri_change_ts = 0.0  # time.monotonic() of last SetAVTransportURI we issued
+USER_STOP_WINDOW = 10.0  # suppress auto-advance this long after a user stop
+URI_SYNC_GRACE = 5.0  # skip gapless index sync this long after we set a URI
+
+
+def _mark_user_stop():
+    """Record a user-initiated stop so auto-advance doesn't mistake the
+    resulting PLAYING -> STOPPED transition for end-of-track."""
+    global _user_stop_ts
+    _user_stop_ts = time.monotonic()
+
+
+def _track_id_from_stream_uri(uri: str) -> str | None:
+    """Extract the track id from a /stream/{id} URL reported by the device."""
+    marker = "/stream/"
+    if not uri or marker not in uri:
+        return None
+    tail = uri.rsplit(marker, 1)[1].strip("/")
+    # Strip any query string a device might append
+    tail = tail.split("?", 1)[0]
+    return tail or None
+
+
+async def _sync_index_with_device():
+    """Detect gapless auto-advance: with SetNextAVTransportURI the device
+    switches tracks by itself while transport stays PLAYING, so current_index
+    must follow the URI the device is actually playing."""
+    if time.monotonic() - _uri_change_ts < URI_SYNC_GRACE:
+        return  # we just set a URI ourselves; device may still report the old one
+    info = await dlna_get_position()
+    track_id = _track_id_from_stream_uri(info.get("track_uri", ""))
+    if track_id is None:
+        return
+    idx = next((i for i, t in enumerate(state.queue) if t.id == track_id), None)
+    if idx is None or idx == state.current_index:
+        return
+    state.current_index = idx
+    log.info("Device advanced via gapless to track %d (%s)", idx, state.queue[idx].title)
+    await _preload_next()
+    _save_state()
 
 
 async def auto_advance_loop():
@@ -1028,7 +1251,16 @@ async def auto_advance_loop():
             continue
         try:
             ts = await dlna_get_transport_state()
+            if ts == "PLAYING":
+                try:
+                    await _sync_index_with_device()
+                except Exception as e:
+                    log.debug("Gapless index sync failed: %s", e)
             if _last_transport_state == "PLAYING" and ts in ("STOPPED", "NO_MEDIA_PRESENT"):
+                if time.monotonic() - _user_stop_ts < USER_STOP_WINDOW:
+                    log.debug("Ignoring STOPPED transition after user stop")
+                    _last_transport_state = ts
+                    continue
                 next_idx = _get_next_index()
                 if next_idx is not None:
                     state.current_index = next_idx
@@ -1057,7 +1289,8 @@ async def auto_advance_loop():
 
 
 async def keepalive_loop():
-    """Ping the connected device every 15s to prevent it from sleeping.
+    """Ping the connected device every 15s to prevent it from sleeping and
+    re-check its volume (see _poll_device_volume).
     Retries up to 3 times before marking disconnected.  When disconnected,
     nudges the device with a raw HTTP GET to its description URL so it stays
     on Wi-Fi long enough for SSDP rediscovery."""
@@ -1069,7 +1302,9 @@ async def keepalive_loop():
         if _device_ready():
             try:
                 await dlna_get_transport_state()
+                recovering = fail_count > 0
                 fail_count = 0
+                await _poll_device_volume(recovering=recovering)
             except Exception as e:
                 fail_count += 1
                 log.warning("Device keepalive failed (%d/%d): %s",
@@ -1099,13 +1334,17 @@ def _device_ready():
 
 
 async def _play_current():
+    global _uri_change_ts
     if state.current_index < 0 or state.current_index >= len(state.queue):
         return
     if not _device_ready():
         raise HTTPException(status_code=503, detail="Device not connected")
     track = state.queue[state.current_index]
+    _uri_change_ts = time.monotonic()
     await dlna_set_uri(track)
     await dlna_play()
+    if _volume_push_pending:
+        await _push_volume()
     # Pre-load next track for gapless playback
     await _preload_next()
 
@@ -1127,23 +1366,42 @@ async def _preload_next():
         log.debug("SetNextAVTransportURI not supported or failed: %s", e)
 
 
-def _get_next_index() -> int | None:
-    """Get the next track index based on play mode."""
+def _get_next_index(manual: bool = False) -> int | None:
+    """Get the next track index based on play mode.
+
+    manual=True is a user-initiated skip: REPEAT_ONE then advances to the
+    next track (repeat-one only governs automatic end-of-track repeats)."""
     if not state.queue:
         return None
-    if state.play_mode == "REPEAT_ONE":
-        return state.current_index
-    if state.play_mode == "SHUFFLE":
+    mode = state.play_mode
+    if mode == "REPEAT_ONE":
+        if not manual:
+            return state.current_index
+        mode = "NORMAL"
+    if mode == "SHUFFLE":
         import random
         candidates = [i for i in range(len(state.queue)) if i != state.current_index]
         return random.choice(candidates) if candidates else None
     # NORMAL or REPEAT_ALL
     next_idx = state.current_index + 1
     if next_idx >= len(state.queue):
-        if state.play_mode == "REPEAT_ALL":
+        if mode == "REPEAT_ALL":
             return 0
         return None
     return next_idx
+
+
+def _get_prev_index() -> int | None:
+    """Previous track index: sequential (SHUFFLE has no history, so it also
+    steps back sequentially); REPEAT_ALL wraps from first to last."""
+    if not state.queue or state.current_index < 0:
+        return None
+    prev_idx = state.current_index - 1
+    if prev_idx < 0:
+        if state.play_mode == "REPEAT_ALL":
+            return len(state.queue) - 1
+        return None
+    return prev_idx
 
 
 def _track_dict(t: Track) -> dict:

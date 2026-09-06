@@ -408,3 +408,385 @@ class TestStatePersistenceNewFields:
         app._load_state()
         assert app.state.last_device == ""
         assert app.state.last_device_url == ""
+
+
+# ---------------------------------------------------------------------------
+# _track_id_from_stream_uri (gapless index sync)
+# ---------------------------------------------------------------------------
+
+class TestTrackIdFromStreamUri:
+    def test_normal(self):
+        assert app._track_id_from_stream_uri("http://192.168.1.5:8000/stream/abc12345") == "abc12345"
+
+    def test_trailing_slash(self):
+        assert app._track_id_from_stream_uri("http://192.168.1.5:8000/stream/abc12345/") == "abc12345"
+
+    def test_query_string(self):
+        assert app._track_id_from_stream_uri("http://192.168.1.5:8000/stream/abc12345?foo=1") == "abc12345"
+
+    def test_empty(self):
+        assert app._track_id_from_stream_uri("") is None
+
+    def test_not_implemented(self):
+        assert app._track_id_from_stream_uri("NOT_IMPLEMENTED") is None
+
+    def test_foreign_uri(self):
+        assert app._track_id_from_stream_uri("http://radio.example.com/live.mp3") is None
+
+    def test_marker_but_no_id(self):
+        assert app._track_id_from_stream_uri("http://192.168.1.5:8000/stream/") is None
+
+
+# ---------------------------------------------------------------------------
+# _mark_user_stop (auto-advance suppression)
+# ---------------------------------------------------------------------------
+
+class TestMarkUserStop:
+    def teardown_method(self):
+        app._user_stop_ts = 0.0
+
+    def test_mark_sets_recent_timestamp(self):
+        import time as _time
+        app._mark_user_stop()
+        assert _time.monotonic() - app._user_stop_ts < 1.0
+
+    def test_default_is_outside_window(self):
+        import time as _time
+        app._user_stop_ts = 0.0
+        assert _time.monotonic() - app._user_stop_ts >= app.USER_STOP_WINDOW
+
+
+# ---------------------------------------------------------------------------
+# _drop_track_at (queue removal index adjustment)
+# ---------------------------------------------------------------------------
+
+class TestDropTrackAt:
+    def _mk(self, tid):
+        return app.Track(id=tid, title=tid, artist="", source_type="youtube",
+                         source_url=f"https://youtu.be/{tid}")
+
+    def setup_method(self):
+        app.state.queue = [self._mk("aa"), self._mk("bb"), self._mk("cc")]
+        app.state.current_index = 1
+
+    def teardown_method(self):
+        app.state.queue.clear()
+        app.state.current_index = -1
+
+    def test_remove_before_current_shifts_index(self):
+        app._drop_track_at(0)
+        assert [t.id for t in app.state.queue] == ["bb", "cc"]
+        assert app.state.current_index == 0  # still points at "bb"
+
+    def test_remove_after_current_keeps_index(self):
+        app._drop_track_at(2)
+        assert [t.id for t in app.state.queue] == ["aa", "bb"]
+        assert app.state.current_index == 1
+
+    def test_remove_current_mid_queue_points_to_next(self):
+        app._drop_track_at(1)
+        assert [t.id for t in app.state.queue] == ["aa", "cc"]
+        assert app.state.current_index == 1  # now points at "cc"
+
+    def test_remove_current_last_resets_index(self):
+        app.state.current_index = 2
+        app._drop_track_at(2)
+        assert app.state.current_index == -1
+
+    def test_remove_only_track_resets_index(self):
+        app.state.queue = [self._mk("solo")]
+        app.state.current_index = 0
+        app._drop_track_at(0)
+        assert app.state.queue == []
+        assert app.state.current_index == -1
+
+    def test_deletes_cached_file(self, tmp_path):
+        f = tmp_path / "aa.mp3"
+        f.write_bytes(b"x")
+        app.state.queue[0].local_path = str(f)
+        app._drop_track_at(0)
+        assert not f.exists()
+
+
+# ---------------------------------------------------------------------------
+# _get_next_index / _get_prev_index (play modes, manual vs auto)
+# ---------------------------------------------------------------------------
+
+class TestNextPrevIndex:
+    def _mk(self, tid):
+        return app.Track(id=tid, title=tid, artist="", source_type="youtube",
+                         source_url=f"https://youtu.be/{tid}")
+
+    def setup_method(self):
+        app.state.queue = [self._mk("aa"), self._mk("bb"), self._mk("cc")]
+        app.state.current_index = 1
+        app.state.play_mode = "NORMAL"
+
+    def teardown_method(self):
+        app.state.queue.clear()
+        app.state.current_index = -1
+        app.state.play_mode = "NORMAL"
+
+    # next
+    def test_normal_next(self):
+        assert app._get_next_index() == 2
+
+    def test_normal_end_of_queue(self):
+        app.state.current_index = 2
+        assert app._get_next_index() is None
+
+    def test_repeat_all_wraps(self):
+        app.state.play_mode = "REPEAT_ALL"
+        app.state.current_index = 2
+        assert app._get_next_index() == 0
+
+    def test_repeat_one_auto_repeats(self):
+        app.state.play_mode = "REPEAT_ONE"
+        assert app._get_next_index() == 1
+
+    def test_repeat_one_manual_advances(self):
+        app.state.play_mode = "REPEAT_ONE"
+        assert app._get_next_index(manual=True) == 2
+
+    def test_shuffle_excludes_current(self):
+        app.state.play_mode = "SHUFFLE"
+        for _ in range(20):
+            assert app._get_next_index() in (0, 2)
+
+    def test_shuffle_single_track(self):
+        app.state.play_mode = "SHUFFLE"
+        app.state.queue = [self._mk("solo")]
+        app.state.current_index = 0
+        assert app._get_next_index() is None
+
+    def test_empty_queue(self):
+        app.state.queue = []
+        assert app._get_next_index() is None
+
+    def test_manual_next_with_nothing_playing_starts_first(self):
+        app.state.current_index = -1
+        assert app._get_next_index(manual=True) == 0
+
+    # prev
+    def test_normal_prev(self):
+        assert app._get_prev_index() == 0
+
+    def test_normal_prev_at_start(self):
+        app.state.current_index = 0
+        assert app._get_prev_index() is None
+
+    def test_repeat_all_prev_wraps(self):
+        app.state.play_mode = "REPEAT_ALL"
+        app.state.current_index = 0
+        assert app._get_prev_index() == 2
+
+    def test_shuffle_prev_is_sequential(self):
+        app.state.play_mode = "SHUFFLE"
+        assert app._get_prev_index() == 0
+
+    def test_prev_with_nothing_playing(self):
+        app.state.current_index = -1
+        assert app._get_prev_index() is None
+
+
+# ---------------------------------------------------------------------------
+# Volume sync (restore on reconnect, adopt on new device, keepalive drift)
+# ---------------------------------------------------------------------------
+
+class TestIsLastDevice:
+    def setup_method(self):
+        app.state.last_device = ""
+        app.state.last_device_url = ""
+
+    teardown_method = setup_method
+
+    def test_nothing_saved(self):
+        assert app._is_last_device("Bulb", "http://192.168.1.49:49152/desc.xml") is False
+
+    def test_name_match(self):
+        app.state.last_device = "Bulb"
+        assert app._is_last_device("Bulb", "http://10.0.0.9/x.xml") is True
+
+    def test_exact_url_match(self):
+        app.state.last_device_url = "http://192.168.1.49:49152/desc.xml"
+        assert app._is_last_device("unknown", "http://192.168.1.49:49152/desc.xml") is True
+
+    def test_ip_match_after_name_reset_and_new_path(self):
+        app.state.last_device = "Bulb"
+        app.state.last_device_url = "http://192.168.1.49:49152/desc.xml"
+        assert app._is_last_device("unknown", "http://192.168.1.49:8080/upnp/dev.xml") is True
+
+    def test_different_device(self):
+        app.state.last_device = "Bulb"
+        app.state.last_device_url = "http://192.168.1.49:49152/desc.xml"
+        assert app._is_last_device("LG TV", "http://192.168.1.77:1234/desc.xml") is False
+
+    def test_unparseable_url(self):
+        app.state.last_device_url = "not a url"
+        assert app._is_last_device("x", "also not") is False
+
+
+class _VolumeTestBase:
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.original_state_file = app.STATE_FILE
+        app.STATE_FILE = Path(self.tmpdir) / "state.json"
+        app.state.volume = 30
+        app._volume_push_pending = False
+        app._volume_set_ts = 0.0
+
+    def teardown_method(self):
+        app.STATE_FILE = self.original_state_file
+        app.state.volume = 30
+        app._volume_push_pending = False
+        app._volume_set_ts = 0.0
+
+
+class TestSyncDeviceVolume(_VolumeTestBase):
+    @pytest.mark.asyncio
+    async def test_equal_does_nothing(self):
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=30), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._sync_device_volume(restore=True)
+        set_vol.assert_not_called()
+        assert app.state.volume == 30
+
+    @pytest.mark.asyncio
+    async def test_restore_pushes_saved_volume(self):
+        """Device came back at 100 after a reboot: push our saved 30."""
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=100), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._sync_device_volume(restore=True)
+        set_vol.assert_awaited_once_with(30)
+        assert app.state.volume == 30
+        assert app._volume_push_pending is False
+
+    @pytest.mark.asyncio
+    async def test_restore_push_failure_sets_pending(self):
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=100), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock,
+                          side_effect=RuntimeError("712")):
+            await app._sync_device_volume(restore=True)
+        assert app.state.volume == 30
+        assert app._volume_push_pending is True
+
+    @pytest.mark.asyncio
+    async def test_adopt_takes_device_volume(self):
+        """User picked a different device: its current level wins."""
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=12), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._sync_device_volume(restore=False)
+        set_vol.assert_not_called()
+        assert app.state.volume == 12
+
+    @pytest.mark.asyncio
+    async def test_get_failure_leaves_state(self):
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock,
+                          side_effect=RuntimeError("no GetVolume")), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._sync_device_volume(restore=True)
+        set_vol.assert_not_called()
+        assert app.state.volume == 30
+        assert app._volume_push_pending is False
+
+
+class TestPollDeviceVolume(_VolumeTestBase):
+    @pytest.mark.asyncio
+    async def test_external_change_is_adopted_and_saved(self):
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=45), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._poll_device_volume()
+        set_vol.assert_not_called()
+        assert app.state.volume == 45
+        assert json.loads(app.STATE_FILE.read_text())["volume"] == 45
+
+    @pytest.mark.asyncio
+    async def test_reset_to_max_is_pushed_back(self):
+        """Device jumped to 100 (CY920 reboot signature): restore, don't adopt."""
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=100), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._poll_device_volume()
+        set_vol.assert_awaited_once_with(30)
+        assert app.state.volume == 30
+        assert not app.STATE_FILE.exists()
+
+    @pytest.mark.asyncio
+    async def test_recovering_ping_treats_mismatch_as_reset(self):
+        """Previous keepalive ping failed -> any mismatch is a reboot reset."""
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=60), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._poll_device_volume(recovering=True)
+        set_vol.assert_awaited_once_with(30)
+        assert app.state.volume == 30
+
+    @pytest.mark.asyncio
+    async def test_skipped_within_grace_after_local_set(self):
+        app._volume_set_ts = time.monotonic()
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock, return_value=45) as get_vol:
+            await app._poll_device_volume()
+        get_vol.assert_not_called()
+        assert app.state.volume == 30
+
+    @pytest.mark.asyncio
+    async def test_set_landing_during_get_is_not_clobbered(self):
+        """A SetVolume that lands while GetVolume is in flight must win."""
+        async def stale_get(*a, **k):
+            app._volume_set_ts = time.monotonic()  # simulate /api/volume racing us
+            app.state.volume = 60
+            return 30
+        with patch.object(app, "dlna_get_volume", side_effect=stale_get):
+            await app._poll_device_volume()
+        assert app.state.volume == 60
+
+    @pytest.mark.asyncio
+    async def test_pending_push_is_retried(self):
+        app._volume_push_pending = True
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock) as get_vol, \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._poll_device_volume()
+        get_vol.assert_not_called()
+        set_vol.assert_awaited_once_with(30)
+        assert app._volume_push_pending is False
+
+    @pytest.mark.asyncio
+    async def test_get_failure_is_silent(self):
+        with patch.object(app, "dlna_get_volume", new_callable=AsyncMock,
+                          side_effect=RuntimeError("boom")):
+            await app._poll_device_volume()
+        assert app.state.volume == 30
+
+
+class TestPlayCurrentVolumeRetry(_VolumeTestBase):
+    def setup_method(self):
+        super().setup_method()
+        app.state.queue.clear()
+        app.state.queue.append(app.Track(id="a", title="A", artist="", source_type="youtube",
+                                         source_url="u", local_path="/nonexistent.mp3"))
+        app.state.current_index = 0
+
+    def teardown_method(self):
+        super().teardown_method()
+        app.state.queue.clear()
+        app.state.current_index = -1
+
+    @pytest.mark.asyncio
+    async def test_pending_volume_pushed_after_play(self):
+        app._volume_push_pending = True
+        with patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_set_uri", new_callable=AsyncMock), \
+             patch.object(app, "dlna_play", new_callable=AsyncMock), \
+             patch.object(app, "_preload_next", new_callable=AsyncMock), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._play_current()
+        set_vol.assert_awaited_once_with(30)
+        assert app._volume_push_pending is False
+
+    @pytest.mark.asyncio
+    async def test_no_push_when_not_pending(self):
+        with patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_set_uri", new_callable=AsyncMock), \
+             patch.object(app, "dlna_play", new_callable=AsyncMock), \
+             patch.object(app, "_preload_next", new_callable=AsyncMock), \
+             patch.object(app, "dlna_set_volume", new_callable=AsyncMock) as set_vol:
+            await app._play_current()
+        set_vol.assert_not_called()

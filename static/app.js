@@ -45,7 +45,17 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(`/api${path}`, opts);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch {}
+    throw new Error(detail || `HTTP ${res.status}`);
+  }
   return res.json();
+}
+
+// Fire-and-forget API call: log failures instead of raising unhandled rejections
+function send(method, path, body) {
+  return api(method, path, body).catch((e) => console.warn(`${method} ${path}:`, e.message));
 }
 
 function fmt(sec) {
@@ -144,12 +154,12 @@ function renderQueue(queue, currentIdx) {
     `;
 
     li.querySelector(".q-info").addEventListener("click", () => {
-      api("POST", "/play", { track_id: track.id });
+      send("POST", "/play", { track_id: track.id });
     });
 
     li.querySelector(".q-remove").addEventListener("click", (e) => {
       e.stopPropagation();
-      api("DELETE", `/queue/${track.id}`);
+      send("DELETE", `/queue/${track.id}`);
     });
 
     els.queueList.appendChild(li);
@@ -186,7 +196,8 @@ function renderDownload(dl) {
       ? ` \u2022 ~${Math.ceil(remaining / 60)}m left`
       : ` \u2022 ~${remaining}s left`;
   }
-  count.textContent = dl.total === 1 ? (eta || "") : `${dl.done}/${dl.total}${eta}`;
+  const failed = dl.failed ? ` • ${dl.failed} failed` : "";
+  count.textContent = (dl.total === 1 ? (eta || "") : `${dl.done}/${dl.total}${eta}`) + failed;
   const pct = dl.total > 0 ? (dl.done / dl.total) * 100 : 0;
   fill.style.width = `${pct}%`;
 
@@ -315,7 +326,7 @@ function renderDeviceList(devices, current) {
       <span class="d-model">${esc(d.model)}</span>
     `;
     li.addEventListener("click", async () => {
-      await api("POST", "/devices/select", { name: d.name });
+      await send("POST", "/devices/select", { name: d.name });
       els.devicePicker.classList.add("hidden");
       poll();
     });
@@ -325,12 +336,12 @@ function renderDeviceList(devices, current) {
 
 // --- Controls ---
 els.btnPlay.addEventListener("click", () => {
-  api("POST", isPlaying ? "/pause" : "/play");
+  send("POST", isPlaying ? "/pause" : "/play");
 });
 
-els.btnStop.addEventListener("click", () => api("POST", "/stop"));
-els.btnNext.addEventListener("click", () => api("POST", "/next"));
-els.btnPrev.addEventListener("click", () => api("POST", "/prev"));
+els.btnStop.addEventListener("click", () => send("POST", "/stop"));
+els.btnNext.addEventListener("click", () => send("POST", "/next"));
+els.btnPrev.addEventListener("click", () => send("POST", "/prev"));
 
 // Seek — tap on progress bar
 $(".progress-bar").addEventListener("click", (e) => {
@@ -341,7 +352,7 @@ $(".progress-bar").addEventListener("click", (e) => {
   const pos = Math.floor(pct * knownDuration);
   knownPosition = pos;
   lastPollTime = Date.now();
-  api("POST", "/seek", { position: pos });
+  send("POST", "/seek", { position: pos });
 });
 
 // Play mode toggle
@@ -351,7 +362,7 @@ $("#btn-mode").addEventListener("click", () => {
   const next = modes[(cur + 1) % modes.length];
   currentMode = next;
   updateModeIcon(next);
-  api("POST", "/play-mode", { mode: next });
+  send("POST", "/play-mode", { mode: next });
 });
 
 let currentMode = "NORMAL";
@@ -371,7 +382,7 @@ els.volume.addEventListener("input", () => {
   els.volumeVal.textContent = els.volume.value;
   clearTimeout(volumeTimeout);
   volumeTimeout = setTimeout(() => {
-    api("POST", "/volume", { level: parseInt(els.volume.value) });
+    send("POST", "/volume", { level: parseInt(els.volume.value) });
     volumeTimeout = null;
   }, 200);
 });
