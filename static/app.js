@@ -134,8 +134,19 @@ async function poll() {
 }
 
 // --- Queue ---
+// Cards are rebuilt only when the queue changes (the status poll runs every
+// 2s), so the horizontal scroll position survives between polls.
+let queueSig = "";
+let lastCurrentIdx = -1;
+
 function renderQueue(queue, currentIdx) {
   els.queueCount.textContent = queue.length ? `(${queue.length})` : "";
+
+  const sig = currentIdx + "|" + queue.map((t) => t.id + (t.ready ? "+" : "-")).join(",");
+  if (sig === queueSig) return;
+  queueSig = sig;
+
+  const scrollLeft = els.queueList.scrollLeft;
   els.queueList.innerHTML = "";
 
   queue.forEach((track, i) => {
@@ -144,16 +155,17 @@ function renderQueue(queue, currentIdx) {
 
     const statusBadge = track.ready ? "" : '<span class="q-dl">downloading</span>';
     li.innerHTML = `
-      <div class="q-info">
-        <div class="q-title">${esc(track.title)}</div>
-        <div class="q-artist">${esc(track.artist)}</div>
+      <div class="q-idx">${i + 1}</div>
+      <div class="q-title">${esc(track.title)}</div>
+      <div class="q-artist">${esc(track.artist)}</div>
+      <div class="q-bottom">
+        <span class="q-dur">${fmt(track.duration)}</span>
+        ${statusBadge}
       </div>
-      ${statusBadge}
-      <span class="q-dur">${fmt(track.duration)}</span>
-      <button class="q-remove" data-id="${track.id}">&times;</button>
+      <button class="q-remove" data-id="${track.id}" title="Remove">&times;</button>
     `;
 
-    li.querySelector(".q-info").addEventListener("click", () => {
+    li.addEventListener("click", () => {
       send("POST", "/play", { track_id: track.id });
     });
 
@@ -164,7 +176,32 @@ function renderQueue(queue, currentIdx) {
 
     els.queueList.appendChild(li);
   });
+
+  els.queueList.scrollLeft = scrollLeft;
+
+  // Bring the playing card into view when the track changes (not on every poll,
+  // so it never fights the user's own scrolling)
+  if (currentIdx !== lastCurrentIdx) {
+    lastCurrentIdx = currentIdx;
+    scrollQueueToActive();
+  }
 }
+
+function scrollQueueToActive() {
+  const active = els.queueList.querySelector(".queue-item.active");
+  if (!active) return;
+  const list = els.queueList;
+  const left = active.offsetLeft - (list.clientWidth - active.offsetWidth) / 2;
+  list.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+}
+
+// Mouse wheel over the strip scrolls it sideways
+els.queueList.addEventListener("wheel", (e) => {
+  if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+    e.preventDefault();
+    els.queueList.scrollLeft += e.deltaY;
+  }
+}, { passive: false });
 
 // --- Download progress ---
 function renderDownload(dl) {
