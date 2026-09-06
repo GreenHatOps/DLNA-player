@@ -250,7 +250,7 @@ header h1 {
    #queue-stage sticks to its top and holds the cards in 3D. */
 #queue-list {
   position: relative;
-  height: 250px;
+  height: 350px;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -263,9 +263,9 @@ header h1 {
 #queue-stage {
   position: sticky;
   top: 0;
-  height: 250px;
-  perspective: 800px;
-  perspective-origin: 50% 40%;
+  height: 350px;
+  perspective: 900px;
+  perspective-origin: 50% 50%;
 }
 #queue-spacer { width: 1px; }
 
@@ -273,7 +273,7 @@ header h1 {
   position: absolute;
   left: 6px;
   right: 6px;
-  top: 74px;
+  top: 126px;
   height: 5px;
   border-radius: 3px;
   background: linear-gradient(90deg, var(--surface2), #55556a 20%, #8a8aa4 50%, #55556a 80%, var(--surface2));

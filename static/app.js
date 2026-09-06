@@ -145,9 +145,23 @@ async function poll() {
 // the rod: later cards hang beneath and bend away, earlier cards sit above
 // the rod and bend back.
 const CARD_H = 104;      // px, must match .queue-item height
-const ROD_Y = 76;        // px from stage top where the rod sits
+const GAP = 6;           // px between the front card and its neighbours
+const ROD_Y = 128;       // px from stage top where the rod sits
 const STEP = 56;         // px of scroll per card
-const NEAR = 5;          // cards rendered on each side of the focus
+const NEAR = 4;          // cards rendered on each side of the focus
+const TAB_H = 58;        // px of a card's top strip (index + title) left showing
+const DEG = Math.PI / 180;
+
+// Hinge angle of the k-th neighbour (k >= 1): 40deg, then 12deg steeper each
+function hingeDeg(k) { return Math.min(72, 40 + 12 * (k - 1)); }
+// Projected height of the title strip of neighbour k once it is tilted
+function tabPx(k) { return TAB_H * Math.cos(hingeDeg(k) * DEG); }
+// Stacked tab height for x neighbours (fractional x interpolates)
+function stackPx(x) {
+  let sum = 0, k = 1;
+  for (; k <= Math.floor(x); k++) sum += tabPx(k);
+  return sum + (x - Math.floor(x)) * tabPx(k);
+}
 
 let queueItems = [];
 let queueSig = "";
@@ -229,20 +243,28 @@ function layoutCards() {
 
     const d = i - pos;
     const a = Math.abs(d);
-    const theta = 74 * Math.tanh(1.0 * a);                 // hinge angle: ~56deg at d=1, saturates ~74deg
-    const shift = 0.75 * CARD_H * Math.min(a, 1) + 22 * Math.max(0, a - 1);
-    const depth = -(30 * Math.min(a, 1) + 10 * Math.max(0, a - 1));
-    let top, origin, rot;
-    if (d >= 0) {            // hangs beneath the rod, bottom bends away
-      top = ROD_Y + shift; origin = "top center"; rot = -theta;
-    } else {                 // sits above the rod, top bends back
-      top = ROD_Y - shift; origin = "bottom center"; rot = theta;
+    // Angle: flat at the front, 40deg for the first neighbour, steeper after
+    const theta = a <= 1 ? 40 * a : hingeDeg(a);
+    let top, origin, rot, z;
+    if (d >= 0) {
+      // Later cards: staircase down from the front card's bottom edge, each
+      // showing its index + title strip; nearer cards sit on top.
+      top = a <= 1 ? ROD_Y + (CARD_H + GAP) * a : ROD_Y + CARD_H + GAP + stackPx(a - 1);
+      origin = "top center"; rot = -theta;
+      z = a < 0.5 ? 100 : 90 + Math.round(a);
+    } else {
+      // Earlier cards: staircase up from the rod, tops bending back
+      const bottom = a <= 1 ? ROD_Y + CARD_H - (CARD_H + GAP) * a : ROD_Y - GAP - stackPx(a - 1);
+      top = bottom - CARD_H;
+      origin = "bottom center"; rot = theta;
+      z = a < 0.5 ? 100 : 99 - Math.round(a);
     }
+    const depth = -Math.min(80, 20 * a);
     el.style.top = `${top.toFixed(1)}px`;
     el.style.transformOrigin = origin;
     el.style.transform = `translateZ(${depth.toFixed(1)}px) rotateX(${rot.toFixed(2)}deg)`;
-    el.style.zIndex = String(100 - Math.round(a * 10));
-    el.style.opacity = String(Math.max(0.6, 1 - 0.1 * a));
+    el.style.zIndex = String(z);
+    el.style.opacity = String(Math.max(0.7, 1 - 0.08 * a));
     el.classList.toggle("focus", i === focus);
   }
   updateQueuePos();
