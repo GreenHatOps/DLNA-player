@@ -34,6 +34,7 @@ const els = {
   queuePos: $("#queue-pos"),
   queueScroll: $("#queue-scroll"),
   queueScrollThumb: $("#queue-scroll-thumb"),
+  queuePlaying: $("#queue-playing"),
 };
 
 let isPlaying = false;
@@ -151,8 +152,8 @@ const NEAR = 4;          // cards rendered on each side of the focus
 const TAB_H = 76;        // px of a card's top strip (index + title) left showing
 const DEG = Math.PI / 180;
 
-// Gentle tilt keeps neighbouring titles readable.
-function hingeDeg(k) { return Math.min(36, 16 + 8 * (k - 1)); }
+// Steeply fanned neighbours give the deck its Rolodex depth.
+function hingeDeg(k) { return Math.min(72, 40 + 12 * (k - 1)); }
 // Projected height of the title strip of neighbour k once it is tilted
 function tabPx(k) { return TAB_H * Math.cos(hingeDeg(k) * DEG); }
 // Stacked tab height for x neighbours (fractional x interpolates)
@@ -250,8 +251,8 @@ function layoutCards() {
 
     const d = i - pos;
     const a = Math.abs(d);
-    // Flat at the front, gently tilted for neighbouring cards.
-    const theta = a <= 1 ? 16 * a : hingeDeg(a);
+    // Flat at the front, hinged back into the fan on either side.
+    const theta = a <= 1 ? 40 * a : hingeDeg(a);
     let top, origin, rot, z;
     if (d >= 0) {
       // Later cards: staircase down from the front card's bottom edge, each
@@ -271,7 +272,7 @@ function layoutCards() {
     el.style.transformOrigin = origin;
     el.style.transform = `translateZ(${depth.toFixed(1)}px) rotateX(${rot.toFixed(2)}deg)`;
     el.style.zIndex = String(z);
-    el.style.opacity = String(Math.max(0.9, 1 - 0.025 * a));
+    el.style.opacity = String(Math.max(0.7, 1 - 0.08 * a));
     el.classList.toggle("focus", i === focus);
   }
   updateQueuePos();
@@ -296,13 +297,24 @@ function updateQueuePos() {
   }
   const pos = queuePos();
   els.queuePos.textContent = `${Math.round(pos) + 1} / ${n}`;
-  const trackW = els.queueScroll.clientWidth;
-  const thumbW = Math.max(12, trackW / n);
-  const x = (pos / (n - 1)) * (trackW - thumbW);
+  // Measure after showing the ruler, including the first non-empty render.
+  els.queueScroll.classList.remove("hidden");
+  const trackW = Math.max(0, els.queueScroll.clientWidth - 44);
+  const thumbW = Math.min(44, Math.max(12, trackW / n));
+  const x = 22 + (pos / (n - 1)) * trackW - thumbW / 2;
   els.queueScrollThumb.style.width = `${thumbW}px`;
   els.queueScrollThumb.style.transform = `translateX(${x}px)`;
-  els.queueScroll.classList.remove("hidden");
+  const hasCurrent = activeIdx >= 0 && activeIdx < n;
+  els.queuePlaying.classList.toggle("hidden", !hasCurrent);
+  if (hasCurrent) {
+    els.queuePlaying.style.left = `${(activeIdx / (n - 1)) * trackW}px`;
+    const label = `Return to current track: ${queueItems[activeIdx].title} (${activeIdx + 1} of ${n})`;
+    els.queuePlaying.setAttribute("aria-label", label);
+    els.queuePlaying.title = label;
+  }
 }
+
+els.queuePlaying.addEventListener("click", scrollQueueToActive);
 
 // Scroll drives the deck; when scrolling stops, settle on the nearest card
 let layoutRaf = 0;
