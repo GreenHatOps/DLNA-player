@@ -141,19 +141,18 @@ async function poll() {
 // --- Queue (Rolodex) ---
 // #queue-list scrolls vertically over an invisible spacer; the fractional
 // scroll position picks the focused card.  Only the cards near the focus
-// are in the DOM (the queue can hold hundreds).  Each card is hinged on
-// the rod: later cards hang beneath and bend away, earlier cards sit above
-// the rod and bend back.
-const CARD_H = 104;      // px, must match .queue-item height
+// are in the DOM (the queue can hold hundreds). Later cards fan beneath
+// the focused card and bend away; earlier cards fan above and bend back.
+const CARD_H = 144;      // px, must match .queue-item height
 const GAP = 6;           // px between the front card and its neighbours
-const ROD_Y = 128;       // px from stage top where the rod sits
+const ROD_Y = 160;       // px from stage top to the front card top
 const STEP = 56;         // px of scroll per card
 const NEAR = 4;          // cards rendered on each side of the focus
-const TAB_H = 58;        // px of a card's top strip (index + title) left showing
+const TAB_H = 76;        // px of a card's top strip (index + title) left showing
 const DEG = Math.PI / 180;
 
-// Hinge angle of the k-th neighbour (k >= 1): 40deg, then 12deg steeper each
-function hingeDeg(k) { return Math.min(72, 40 + 12 * (k - 1)); }
+// Gentle tilt keeps neighbouring titles readable.
+function hingeDeg(k) { return Math.min(36, 16 + 8 * (k - 1)); }
 // Projected height of the title strip of neighbour k once it is tilted
 function tabPx(k) { return TAB_H * Math.cos(hingeDeg(k) * DEG); }
 // Stacked tab height for x neighbours (fractional x interpolates)
@@ -211,16 +210,24 @@ function makeCard(i) {
       <span class="q-dur">${fmt(track.duration)}</span>
       ${statusBadge}
     </div>
-    <button class="q-remove" data-id="${track.id}" title="Remove">&times;</button>
+    <button class="q-play" type="button" ${track.ready ? "" : "disabled"}>${track.ready ? "▶ Play" : "Downloading…"}</button>
+    <button class="q-remove" type="button" title="Remove">&times;</button>
   `;
-  el.addEventListener("click", () => {
-    // Tap the front card to play it; tap a bent card to flip to it
-    if (Math.round(queuePos()) === i) send("POST", "/play", { track_id: track.id });
-    else scrollQueueTo(i);
+  const play = () => {
+    if (!track.ready) return;
+    scrollQueueTo(i);
+    send("POST", "/play", { track_id: track.id });
+  };
+  el.addEventListener("click", play);
+  const playButton = el.querySelector(".q-play");
+  playButton.setAttribute("aria-label", `Play ${track.title}`);
+  playButton.addEventListener("click", (e) => {
+    e.stopPropagation();
+    play();
   });
   el.querySelector(".q-remove").addEventListener("click", (e) => {
     e.stopPropagation();
-    send("DELETE", `/queue/${track.id}`);
+    send("DELETE", `/queue/${encodeURIComponent(track.id)}`);
   });
   return el;
 }
@@ -243,8 +250,8 @@ function layoutCards() {
 
     const d = i - pos;
     const a = Math.abs(d);
-    // Angle: flat at the front, 40deg for the first neighbour, steeper after
-    const theta = a <= 1 ? 40 * a : hingeDeg(a);
+    // Flat at the front, gently tilted for neighbouring cards.
+    const theta = a <= 1 ? 16 * a : hingeDeg(a);
     let top, origin, rot, z;
     if (d >= 0) {
       // Later cards: staircase down from the front card's bottom edge, each
@@ -253,7 +260,7 @@ function layoutCards() {
       origin = "top center"; rot = -theta;
       z = a < 0.5 ? 100 : 90 + Math.round(a);
     } else {
-      // Earlier cards: staircase up from the rod, tops bending back
+      // Earlier cards: staircase up from the front card, tops bending back
       const bottom = a <= 1 ? ROD_Y + CARD_H - (CARD_H + GAP) * a : ROD_Y - GAP - stackPx(a - 1);
       top = bottom - CARD_H;
       origin = "bottom center"; rot = theta;
@@ -264,7 +271,7 @@ function layoutCards() {
     el.style.transformOrigin = origin;
     el.style.transform = `translateZ(${depth.toFixed(1)}px) rotateX(${rot.toFixed(2)}deg)`;
     el.style.zIndex = String(z);
-    el.style.opacity = String(Math.max(0.7, 1 - 0.08 * a));
+    el.style.opacity = String(Math.max(0.9, 1 - 0.025 * a));
     el.classList.toggle("focus", i === focus);
   }
   updateQueuePos();

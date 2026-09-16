@@ -2,6 +2,7 @@
 import json
 import time
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
 
@@ -9,6 +10,26 @@ import pytest
 
 # Import the module under test
 import app
+
+
+class TestQueueMarkup:
+    def test_decorative_rod_removed_without_removing_queue_controls(self):
+        class Elements(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.attrs = []
+
+            def handle_starttag(self, tag, attrs):
+                self.attrs.append(dict(attrs))
+
+        page = Elements()
+        page.feed((app.STATIC_DIR / "index.html").read_text())
+        ids = [attrs["id"] for attrs in page.attrs if "id" in attrs]
+        for required in ("queue-list", "queue-stage", "queue-spacer", "queue-pos",
+                         "queue-scroll", "queue-scroll-thumb"):
+            assert ids.count(required) == 1
+        assert all("queue-rod" not in attrs.get("class", "").split()
+                   for attrs in page.attrs)
 
 
 # ---------------------------------------------------------------------------
