@@ -168,7 +168,10 @@ function renderQueue(queue, currentIdx) {
   els.queueCount.textContent = queue.length ? `(${queue.length})` : "";
 
   const sig = currentIdx + "|" + queue.map((t) => t.id + (t.ready ? "+" : "-")).join(",");
-  if (sig === queueSig) return;
+  if (sig === queueSig) {
+    cardEls.forEach((el, i) => updateCardPlayback(el, i));
+    return;
+  }
   queueSig = sig;
 
   queueItems = queue;
@@ -203,16 +206,28 @@ function makeCard(i) {
     <button class="q-play" type="button" ${track.ready ? "" : "disabled"}><svg aria-hidden="true" viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button>
     <button class="q-remove" type="button" title="Remove">&times;</button>
   `;
-  const play = () => {
-    if (!track.ready) return;
+  let pending = false;
+  const play = async () => {
+    if (!track.ready || pending) return;
+    pending = true;
+    playButton.disabled = true;
     scrollQueueTo(i);
-    send("POST", "/play", { track_id: track.id });
+    try {
+      if (i === activeIdx) {
+        // No track_id when resuming: selecting it again would restart the song.
+        await send("POST", isPlaying ? "/pause" : "/play");
+      } else {
+        await send("POST", "/play", { track_id: track.id });
+      }
+      await poll();
+    } finally {
+      pending = false;
+      playButton.disabled = !track.ready;
+    }
   };
   el.addEventListener("click", play);
   const playButton = el.querySelector(".q-play");
-  const playLabel = `${track.ready ? "Play" : "Downloading"} ${track.title}`;
-  playButton.setAttribute("aria-label", playLabel);
-  playButton.title = playLabel;
+  updateCardPlayback(el, i);
   playButton.addEventListener("click", (e) => {
     e.stopPropagation();
     play();
@@ -222,6 +237,19 @@ function makeCard(i) {
     send("DELETE", `/queue/${encodeURIComponent(track.id)}`);
   });
   return el;
+}
+
+// Playback can change without the queue or current index changing.
+function updateCardPlayback(el, i) {
+  const track = queueItems[i];
+  const pause = i === activeIdx && isPlaying;
+  const button = el.querySelector(".q-play");
+  const label = `${!track.ready ? "Downloading" : pause ? "Pause" : "Play"} ${track.title}`;
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.querySelector("path").setAttribute("d", pause
+    ? "M6 5h4v14H6zm8 0h4v14h-4z"
+    : "M8 5v14l11-7z");
 }
 
 function layoutCards() {
