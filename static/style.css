@@ -275,13 +275,13 @@ header h1 {
   transform: translateX(0);
 }
 
-/* Rolodex: a fan of cards, scrolled vertically.  The focused card is flat;
-   earlier cards bend back above it, later ones bend away beneath it.
+/* Rolodex: compact cards tangent to a cylinder, scrolled vertically.
+   Cards curve away above and below the front face of the wheel.
    #queue-list is a plain vertical scroller,
    #queue-stage sticks to its top and holds the cards in 3D. */
 #queue-list {
   position: relative;
-  height: 440px;
+  height: 360px;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -294,7 +294,7 @@ header h1 {
 #queue-stage {
   position: sticky;
   top: 0;
-  height: 440px;
+  height: 360px;
   perspective: 900px;
   perspective-origin: 50% 50%;
 }
@@ -304,13 +304,14 @@ header h1 {
   position: absolute;
   left: 50%;
   top: 0;                    /* set per card by JS */
-  width: min(360px, calc(100% - 16px));
-  height: 144px;             /* must match CARD_H in app.js */
-  margin-left: calc(min(360px, 100% - 16px) / -2);
+  width: min(320px, calc(100% - 16px));
+  height: 104px;             /* must match CARD_H in app.js */
+  margin-left: calc(min(320px, 100% - 16px) / -2);
   background: var(--surface);
   border: 1px solid #2a2a3a;
-  border-radius: 8px;
-  padding: 14px 10px 8px 12px;
+  border-radius: 16px;
+  padding: 8px 48px 8px 12px;
+  background-image: linear-gradient(180deg, #ffffff0d, transparent 30%, #00000022 100%);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -322,7 +323,7 @@ header h1 {
 }
 
 .queue-item.focus { border-color: #3a3a4e; }
-.queue-item.active { border-color: var(--accent); background: var(--surface2); }
+.queue-item.active { border-color: var(--accent); background-color: var(--surface2); }
 .queue-item.active .q-title { color: var(--accent2); }
 .queue-item:not(.focus) .q-remove,
 .queue-item:not(.focus) .q-play { display: none; }
@@ -330,12 +331,15 @@ header h1 {
 .queue-help { color: var(--text2); font-size: 0.85rem; margin: 8px 0; }
 .queue-item .q-play {
   position: absolute;
-  right: 10px;
-  bottom: 8px;
-  min-height: 44px;
-  padding: 8px 16px;
+  right: 4px;
+  bottom: 4px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
   border: 0;
-  border-radius: 8px;
+  border-radius: 50%;
   background: var(--accent);
   color: white;
   font: inherit;
@@ -351,9 +355,8 @@ header h1 {
   line-height: 16px;
 }
 .queue-item .q-title {
-  font-size: 1rem;
-  line-height: 1.25;
-  padding-right: 22px;
+  font-size: 0.88rem;
+  line-height: 1.15;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -369,7 +372,6 @@ header h1 {
 }
 .queue-item .q-bottom {
   margin-top: auto;
-  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 6px;

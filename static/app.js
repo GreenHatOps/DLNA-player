@@ -144,24 +144,13 @@ async function poll() {
 // scroll position picks the focused card.  Only the cards near the focus
 // are in the DOM (the queue can hold hundreds). Later cards fan beneath
 // the focused card and bend away; earlier cards fan above and bend back.
-const CARD_H = 144;      // px, must match .queue-item height
-const GAP = 6;           // px between the front card and its neighbours
-const ROD_Y = 160;       // px from stage top to the front card top
+const CARD_H = 104;      // px, must match .queue-item height
+const WHEEL_CENTER = 180; // px, half the queue-stage height
+const WHEEL_RADIUS = 180;
+const CARD_ANGLE = 28;   // degrees between cards around the cylinder
 const STEP = 56;         // px of scroll per card
-const NEAR = 4;          // cards rendered on each side of the focus
-const TAB_H = 76;        // px of a card's top strip (index + title) left showing
+const NEAR = 4;
 const DEG = Math.PI / 180;
-
-// Steeply fanned neighbours give the deck its Rolodex depth.
-function hingeDeg(k) { return Math.min(72, 40 + 12 * (k - 1)); }
-// Projected height of the title strip of neighbour k once it is tilted
-function tabPx(k) { return TAB_H * Math.cos(hingeDeg(k) * DEG); }
-// Stacked tab height for x neighbours (fractional x interpolates)
-function stackPx(x) {
-  let sum = 0, k = 1;
-  for (; k <= Math.floor(x); k++) sum += tabPx(k);
-  return sum + (x - Math.floor(x)) * tabPx(k);
-}
 
 let queueItems = [];
 let queueSig = "";
@@ -211,7 +200,7 @@ function makeCard(i) {
       <span class="q-dur">${fmt(track.duration)}</span>
       ${statusBadge}
     </div>
-    <button class="q-play" type="button" ${track.ready ? "" : "disabled"}>${track.ready ? "▶ Play" : "Downloading…"}</button>
+    <button class="q-play" type="button" ${track.ready ? "" : "disabled"}><svg aria-hidden="true" viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M8 5v14l11-7z"/></svg></button>
     <button class="q-remove" type="button" title="Remove">&times;</button>
   `;
   const play = () => {
@@ -221,7 +210,9 @@ function makeCard(i) {
   };
   el.addEventListener("click", play);
   const playButton = el.querySelector(".q-play");
-  playButton.setAttribute("aria-label", `Play ${track.title}`);
+  const playLabel = `${track.ready ? "Play" : "Downloading"} ${track.title}`;
+  playButton.setAttribute("aria-label", playLabel);
+  playButton.title = playLabel;
   playButton.addEventListener("click", (e) => {
     e.stopPropagation();
     play();
@@ -251,28 +242,20 @@ function layoutCards() {
 
     const d = i - pos;
     const a = Math.abs(d);
-    // Flat at the front, hinged back into the fan on either side.
-    const theta = a <= 1 ? 40 * a : hingeDeg(a);
-    let top, origin, rot, z;
-    if (d >= 0) {
-      // Later cards: staircase down from the front card's bottom edge, each
-      // showing its index + title strip; nearer cards sit on top.
-      top = a <= 1 ? ROD_Y + (CARD_H + GAP) * a : ROD_Y + CARD_H + GAP + stackPx(a - 1);
-      origin = "top center"; rot = -theta;
-      z = a < 0.5 ? 100 : 90 + Math.round(a);
-    } else {
-      // Earlier cards: staircase up from the front card, tops bending back
-      const bottom = a <= 1 ? ROD_Y + CARD_H - (CARD_H + GAP) * a : ROD_Y - GAP - stackPx(a - 1);
-      top = bottom - CARD_H;
-      origin = "bottom center"; rot = theta;
-      z = a < 0.5 ? 100 : 99 - Math.round(a);
-    }
-    const depth = -Math.min(80, 20 * a);
-    el.style.top = `${top.toFixed(1)}px`;
-    el.style.transformOrigin = origin;
-    el.style.transform = `translateZ(${depth.toFixed(1)}px) rotateX(${rot.toFixed(2)}deg)`;
-    el.style.zIndex = String(z);
-    el.style.opacity = String(Math.max(0.7, 1 - 0.08 * a));
+    // Cards sit tangent to one cylinder: they rise, recede and rotate together.
+    // Back-facing cards stay hidden instead of piling up beyond the wheel edge.
+    const theta = d * CARD_ANGLE;
+    const radians = theta * DEG;
+    const depth = WHEEL_RADIUS * (Math.cos(radians) - 1);
+    const y = WHEEL_RADIUS * Math.sin(radians);
+    const visible = Math.abs(theta) < 90;
+    el.style.top = `${WHEEL_CENTER - CARD_H / 2}px`;
+    el.style.transformOrigin = "center center";
+    el.style.transform = `translateY(${y.toFixed(2)}px) translateZ(${depth.toFixed(2)}px) rotateX(${-theta}deg)`;
+    el.style.zIndex = String(100 - Math.round(a * 10));
+    el.style.opacity = String(visible ? Math.min(1, (90 - Math.abs(theta)) / 18) * Math.max(0.65, 1 - a * 0.12) : 0);
+    el.style.visibility = visible ? "visible" : "hidden";
+    el.style.pointerEvents = visible ? "auto" : "none";
     el.classList.toggle("focus", i === focus);
   }
   updateQueuePos();
