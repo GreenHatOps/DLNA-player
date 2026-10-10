@@ -7,3 +7,4 @@ python-multipart
 imageio-ffmpeg
 pytest
 pytest-asyncio
+ytmusicapi==1.12.3  # pinned: unofficial, the dependency most likely to break on YouTube changes

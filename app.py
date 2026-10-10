@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import socket
 import uuid
 import time
@@ -24,6 +25,9 @@ from typing import TYPE_CHECKING
 from async_upnp_client.aiohttp import AiohttpRequester
 from async_upnp_client.client_factory import UpnpFactory
 
+from soundtouch import SoundTouch
+from ytmusic import YTM
+
 if TYPE_CHECKING:
     from async_upnp_client.client import UpnpDevice, UpnpService
 
@@ -35,6 +39,16 @@ CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
 STATE_FILE = Path(__file__).parent / "cache" / "state.json"
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+# Renderers SSDP doesn't find (the garage SoundTouch SA-4 never answers the
+# MediaRenderer search): comma-separated UPnP description URLs, always listed.
+STATIC_DEVICES = [u.strip() for u in os.environ.get("BV_STATIC_DEVICES", "").split(",") if u.strip()]
+# Downloaded MP3s are evicted oldest-first (never ones still in the queue)
+# once the cache grows past this. 0 disables the cap.
+CACHE_MAX_MB = int(os.environ.get("BV_CACHE_MAX_MB", "3000"))
+# YouTube Music browser-headers file (owner creates it once with
+# `ytmusicapi browser --file /app/cache/ytmusic_browser.json`); anonymous without it.
+YTM_AUTH_FILE = CACHE_DIR / "ytmusic_browser.json"
+GARAGE_PRESETS_FILE = Path(__file__).parent / "garage_presets.json"
 
 
 def get_lan_ip() -> str:
@@ -189,6 +203,15 @@ class PlayModeRequest(BaseModel):
     mode: str  # NORMAL, REPEAT_ALL, REPEAT_ONE, SHUFFLE
 
 
+class YtmEnqueueRequest(BaseModel):
+    kind: str            # song | video | playlist | album | radio
+    id: str              # videoId (song/video/radio) | playlistId | album browseId
+    title: str = ""      # for single songs/videos (avoids a lookup)
+    artist: str = ""
+    duration: int = 0
+    mode: str = "end"    # now | next | end
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
@@ -199,6 +222,7 @@ async def lifespan(app: FastAPI):
     # Immediately nudge last device to prevent deep sleep during restart gap
     if state.last_device_url:
         asyncio.create_task(_nudge_device(state.last_device_url))
+    asyncio.create_task(_register_static_devices())
     asyncio.create_task(connect_loop())
     asyncio.create_task(auto_advance_loop())
     asyncio.create_task(keepalive_loop())
@@ -254,6 +278,7 @@ av_transport: UpnpService | None = None
 rendering_control: UpnpService | None = None
 device: UpnpDevice | None = None
 discovered_devices: dict[str, dict] = {}  # {friendly_name: {url, name, model}}
+soundtouch: SoundTouch | None = None  # set while the connected device is a Bose SoundTouch
 
 # ---------------------------------------------------------------------------
 # DLNA Discovery & Control
@@ -277,13 +302,14 @@ async def discover_and_connect():
         timeout=5,
         async_callback=on_response,
     )
+    for url in STATIC_DEVICES:  # renderers SSDP misses
+        found.setdefault(url, {})
 
     if not found:
         log.debug("No DLNA renderers found on network")
         return
 
-    requester = AiohttpRequester()
-    factory = UpnpFactory(requester)
+    factory = _upnp_factory()
 
     last_known = None
     for location in found:
@@ -323,6 +349,7 @@ async def discover_and_connect():
         device = dev
         av_transport = avt
         rendering_control = rc
+        await _detect_soundtouch(location)
         await _sync_device_volume(restore=True)
         log.info("Reconnected to last device: %s (%s)", dev.friendly_name, location)
     elif av_transport is None and discovered_devices:
@@ -333,11 +360,11 @@ async def discover_and_connect():
 async def connect_to_device(description_url: str):
     """Connect to a specific device by its description URL."""
     global av_transport, rendering_control, device
-    requester = AiohttpRequester()
-    factory = UpnpFactory(requester)
+    factory = _upnp_factory()
     device = await factory.async_create_device(description_url)
     av_transport = device.service("urn:schemas-upnp-org:service:AVTransport:1")
     rendering_control = device.service("urn:schemas-upnp-org:service:RenderingControl:1")
+    await _detect_soundtouch(description_url)
     # Same device as last time (possibly rebooted, renamed to "unknown", or
     # found under a different description path) -> restore our saved volume.
     # A different device -> adopt whatever level it is currently at.
@@ -346,6 +373,41 @@ async def connect_to_device(description_url: str):
     state.last_device_url = description_url
     _save_state()
     log.info("Connected to: %s", device.friendly_name)
+
+
+def _upnp_factory() -> UpnpFactory:
+    """Lenient UPnP parsing: the SoundTouch SA-4 also advertises a Tencent QPlay
+    service whose SCPD has a non-standard root namespace, which the strict
+    parser rejects ("Invalid document root"), losing the whole device."""
+    return UpnpFactory(AiohttpRequester(), non_strict=True)
+
+
+async def _detect_soundtouch(description_url: str):
+    """Point the SoundTouch side-channel at the connected device, or clear it."""
+    global soundtouch
+    soundtouch = await SoundTouch.probe(_device_host(description_url))
+    if soundtouch:
+        log.info("Device is a Bose SoundTouch (%s): using its volume/wake API", soundtouch.host)
+
+
+async def _register_static_devices():
+    """List BV_STATIC_DEVICES at startup even when another device is already
+    connected (SSDP discovery only runs while disconnected). List only:
+    reconnecting is connect_loop's job (its fast reconnect + discovery include
+    static devices); connecting here too raced it and connected twice."""
+    if not STATIC_DEVICES:
+        return
+    factory = _upnp_factory()
+    for url in STATIC_DEVICES:
+        try:
+            dev = await factory.async_create_device(url)
+            if dev.service("urn:schemas-upnp-org:service:AVTransport:1") and \
+               dev.service("urn:schemas-upnp-org:service:RenderingControl:1"):
+                discovered_devices[dev.friendly_name] = {
+                    "url": url, "name": dev.friendly_name, "model": dev.model_name or ""}
+                log.info("Static device: %s (%s)", dev.friendly_name, url)
+        except Exception as e:
+            log.warning("Static device %s unreachable: %s", url, e)
 
 
 def _device_host(url: str) -> str:
@@ -402,6 +464,15 @@ async def _sync_device_volume(restore: bool):
     restore=False -> user picked a different device: adopt its current level."""
     global _volume_push_pending
     _volume_push_pending = False
+    if soundtouch:
+        # SoundTouch: the speaker's own volume is the truth. Its renderer reads 0
+        # in standby, which is a reset, not a user choice.
+        try:
+            if not await soundtouch.is_standby():
+                state.volume, _ = await soundtouch.volume()
+        except Exception as e:
+            log.debug("SoundTouch volume read failed: %s", e)
+        return
     try:
         dev_vol = int(await dlna_get_volume())
     except Exception as e:
@@ -430,6 +501,9 @@ async def _poll_device_volume(recovering: bool = False):
         return
     if time.monotonic() - _volume_set_ts < VOLUME_SYNC_GRACE:
         return
+    if soundtouch:
+        await _poll_soundtouch_volume()
+        return
     try:
         dev_vol = int(await dlna_get_volume())
     except Exception as e:
@@ -447,6 +521,34 @@ async def _poll_device_volume(recovering: bool = False):
         log.info("Volume changed on device: %d -> %d", state.volume, dev_vol)
         state.volume = dev_vol
         _save_state()
+
+
+async def _poll_soundtouch_volume():
+    """Keepalive for a SoundTouch: adopt changes made on the speaker or by Home
+    Assistant (both move the speaker's own volume). Nothing in standby — the
+    renderer's 0 there is a reset, and pushing would be pointless."""
+    st = soundtouch
+    try:
+        if await st.is_standby():
+            return
+        dev_vol, _ = await st.volume()
+    except Exception as e:
+        log.debug("SoundTouch keepalive volume failed: %s", e)
+        return
+    if time.monotonic() - _volume_set_ts < VOLUME_SYNC_GRACE:
+        return
+    if dev_vol != state.volume:
+        log.info("Volume changed on SoundTouch: %d -> %d", state.volume, dev_vol)
+        state.volume = dev_vol
+        _save_state()
+
+
+async def _delayed_push_volume(delay: float):
+    """SoundTouch: re-assert the renderer volume once the stream has started
+    (it can still read 0 right after a wake from standby)."""
+    await asyncio.sleep(delay)
+    if soundtouch and _device_ready():
+        await _push_volume()
 
 
 def _require_avt() -> UpnpService:
@@ -648,7 +750,7 @@ async def download_youtube(url: str, track_id: str) -> dict:
         else:
             raise HTTPException(status_code=500, detail="MP3 conversion failed")
 
-    return {
+    result = {
         "title": info.get("title", "Unknown"),
         "artist": info.get("uploader", info.get("channel", "Unknown")),
         "duration": int(info.get("duration", 0)),
@@ -656,6 +758,33 @@ async def download_youtube(url: str, track_id: str) -> dict:
         "content_type": "audio/mpeg",
         "content_length": mp3_path.stat().st_size,
     }
+    _enforce_cache_cap(keep={str(mp3_path)})
+    return result
+
+
+def _enforce_cache_cap(keep: set[str] = frozenset()):
+    """Delete the oldest cached MP3s until the cache is under CACHE_MAX_MB.
+    Never deletes a file referenced by the queue or listed in `keep` (the
+    download that just finished isn't in the queue yet)."""
+    if CACHE_MAX_MB <= 0:
+        return
+    limit = CACHE_MAX_MB * 1024 * 1024
+    files = sorted(CACHE_DIR.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
+    total = sum(p.stat().st_size for p in files)
+    if total <= limit:
+        return
+    protected = {t.local_path for t in state.queue if t.local_path} | set(keep)
+    freed = 0
+    for p in files:
+        if total - freed <= limit:
+            break
+        if str(p) in protected:
+            continue
+        size = p.stat().st_size
+        p.unlink(missing_ok=True)
+        freed += size
+    if freed:
+        log.info("Cache cap %d MB: evicted %.0f MB of old downloads", CACHE_MAX_MB, freed / 1048576)
 
 
 async def background_download(track: Track):
@@ -788,6 +917,243 @@ async def api_search(req: SearchRequest):
             "thumbnail": info.get("thumbnail", ""),
         })
     return {"results": results}
+
+
+# ---------------------------------------------------------------------------
+# YouTube Music (ytmusic.py) — browse with ytmusicapi, play via the existing
+# yt-dlp download path (music.youtube.com watch URLs).
+# ---------------------------------------------------------------------------
+
+ytm = YTM(YTM_AUTH_FILE)
+
+
+async def _ytm_call(fn, *args):
+    """ytmusicapi is blocking and breaks when YouTube changes: run it in a
+    thread and turn failures into a clean 502 for the UI."""
+    try:
+        return await asyncio.to_thread(fn, *args)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("YouTube Music call %s failed: %s", getattr(fn, "__name__", fn), e)
+        raise HTTPException(status_code=502, detail=f"YouTube Music: {str(e)[:160]}")
+
+
+@app.get("/api/ytm/status")
+async def ytm_status():
+    signed_in = await asyncio.to_thread(lambda: ytm.signed_in)
+    return {"signed_in": signed_in, "auth_file": YTM_AUTH_FILE.exists()}
+
+
+@app.get("/api/ytm/search")
+async def ytm_search(q: str, kind: str = "songs", limit: int = 20):
+    if not q.strip():
+        return {"results": []}
+    return {"results": await _ytm_call(ytm.search, q.strip(), kind, max(1, min(50, limit)))}
+
+
+@app.get("/api/ytm/moods")
+async def ytm_moods():
+    return {"sections": await _ytm_call(ytm.moods)}
+
+
+@app.get("/api/ytm/mood")
+async def ytm_mood(params: str):
+    return {"items": await _ytm_call(ytm.mood_items, params)}
+
+
+@app.get("/api/ytm/home")
+async def ytm_home():
+    return {"shelves": await _ytm_call(ytm.home)}
+
+
+@app.get("/api/ytm/library")
+async def ytm_library():
+    return {"items": await _ytm_call(ytm.library)}
+
+
+@app.get("/api/ytm/tracks")
+async def ytm_tracks(kind: str, id: str):
+    """Preview what a playlist / album / song radio contains."""
+    return {"tracks": await _ytm_resolve(kind, id)}
+
+
+async def _ytm_resolve(kind: str, iid: str, title: str = "", artist: str = "",
+                       duration: int = 0) -> list[dict]:
+    if kind in ("song", "video"):
+        return [{"videoId": iid, "title": title or "Loading...", "artist": artist, "duration": duration}]
+    if kind == "playlist":
+        return await _ytm_call(ytm.playlist_tracks, iid)
+    if kind == "album":
+        return await _ytm_call(ytm.album_tracks, iid)
+    if kind == "radio":
+        return await _ytm_call(ytm.radio, iid)
+    raise HTTPException(status_code=400, detail=f"Unknown kind {kind!r}")
+
+
+@app.post("/api/ytm/enqueue")
+async def ytm_enqueue(req: YtmEnqueueRequest):
+    """Queue YouTube Music tracks: mode 'end' appends, 'next' plays after the
+    current track, 'now' interrupts and plays the first one as soon as it is
+    downloaded. Already-queued tracks are skipped (a single one is jumped to
+    for 'now')."""
+    mode = req.mode if req.mode in ("now", "next", "end") else "end"
+    found = await _ytm_resolve(req.kind, req.id, req.title, req.artist, req.duration)
+    tracks, skipped = [], 0
+    for t in found:
+        url = f"https://music.youtube.com/watch?v={t['videoId']}"
+        if _is_duplicate(url):
+            skipped += 1
+            continue
+        tracks.append(Track(id=str(uuid.uuid4())[:8], title=t["title"], artist=t["artist"],
+                            source_type="youtube", source_url=url, duration=t["duration"]))
+    if not tracks:
+        if mode == "now" and req.kind in ("song", "video"):
+            vid = req.id
+            idx = next((i for i, t in enumerate(state.queue)
+                        if _normalize_yt_url(t.source_url) == vid and t.local_path), None)
+            if idx is not None and _device_ready():
+                state.current_index = idx
+                await _play_current()
+                return {"ok": True, "count": 0, "skipped": skipped, "jumped": True}
+        return {"ok": True, "count": 0, "skipped": skipped}
+
+    was_empty = state.current_index == -1
+    pos = len(state.queue) if (mode == "end" or was_empty) else state.current_index + 1
+    state.queue[pos:pos] = tracks
+    play_first = was_empty or mode == "now"
+    if play_first:
+        state.current_index = pos
+    if mode == "now" and not was_empty and _device_ready():
+        # Stop what's playing so the first new track starts when it lands;
+        # mark it as a user stop so auto-advance doesn't jump ahead meanwhile.
+        _mark_user_stop()
+        try:
+            await dlna_stop()
+        except Exception as e:
+            log.debug("Stop before play-now failed: %s", e)
+    asyncio.create_task(_download_playlist_tracks(tracks, play_first=play_first))
+    log.info("YouTube Music: queued %d track(s) [%s %s] mode=%s", len(tracks), req.kind, req.id, mode)
+    return {"ok": True, "count": len(tracks), "skipped": skipped,
+            "tracks": [_track_dict(t) for t in tracks[:10]]}
+
+
+# ---------------------------------------------------------------------------
+# Garage controller (static/garage.html): the Bose SoundTouch in the garage.
+# Radio presets are sent as their RAW station URL (not via /stream), so Home
+# Assistant's preset sensor and the Morpheus bridge see the same URL as when
+# they start a preset themselves.
+# ---------------------------------------------------------------------------
+
+def _garage_cfg() -> dict:
+    try:
+        return json.loads(GARAGE_PRESETS_FILE.read_text())
+    except Exception as e:
+        log.warning("garage_presets.json unreadable: %s", e)
+        return {"device": "Bose_out", "presets": []}
+
+
+async def _ensure_garage_device() -> str:
+    """Make the garage speaker the active renderer (bulb_voice drives one
+    device at a time). Returns its name; 503 if it is not known/reachable."""
+    name = _garage_cfg().get("device", "Bose_out")
+    if device is not None and device.friendly_name == name and _device_ready():
+        return name
+    if name not in discovered_devices:
+        await _register_static_devices()
+    if name not in discovered_devices:
+        raise HTTPException(status_code=503, detail=f"{name} not found")
+    global av_transport, rendering_control
+    av_transport = None
+    rendering_control = None
+    await connect_to_device(discovered_devices[name]["url"])
+    return name
+
+
+async def dlna_set_raw_uri(url: str, title: str, content_type: str):
+    """SetAVTransportURI with an external URL (radio station), not /stream."""
+    avt = _require_avt()
+    didl = (
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="1" parentID="0" restricted="1">'
+        f'<dc:title>{_xml_escape(title)}</dc:title>'
+        '<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>'
+        f'<res protocolInfo="http-get:*:{content_type}:*">{_xml_escape(url)}</res>'
+        '</item></DIDL-Lite>'
+    )
+    await avt.action("SetAVTransportURI").async_call(
+        InstanceID=0, CurrentURI=url, CurrentURIMetaData=didl)
+
+
+@app.get("/api/garage/state")
+async def garage_state():
+    cfg = _garage_cfg()
+    presets = cfg.get("presets", [])
+    connected = device is not None and device.friendly_name == cfg.get("device") and _device_ready()
+    out = {"device": cfg.get("device"), "connected": connected,
+           "active_device": device.friendly_name if device else None,
+           "presets": [p["name"] for p in presets], "standby": None, "source": None,
+           "volume": state.volume, "preset": None, "transport": None, "track": None}
+    if not connected:
+        return out
+    try:
+        if soundtouch:
+            np = await soundtouch.now_playing()
+            out["source"], out["standby"] = np["source"], np["source"] == "STANDBY"
+            if not out["standby"]:
+                out["volume"], _ = await soundtouch.volume()
+        out["transport"] = await dlna_get_transport_state()
+        uri = (await dlna_get_position()).get("track_uri", "")
+    except Exception as e:
+        log.debug("garage state poll failed: %s", e)
+        return out
+    out["preset"] = next((i + 1 for i, p in enumerate(presets) if p["url"] == uri), None)
+    tid = _track_id_from_stream_uri(uri) if uri.startswith(f"{BASE_URL}/stream/") else None
+    if tid:
+        t = next((t for t in state.queue if t.id == tid), None)
+        if t:
+            out["track"] = _track_dict(t)
+    return out
+
+
+@app.post("/api/garage/connect")
+async def garage_connect():
+    return {"ok": True, "device": await _ensure_garage_device()}
+
+
+@app.post("/api/garage/preset/{n}")
+async def garage_preset(n: int):
+    presets = _garage_cfg().get("presets", [])
+    if not 1 <= n <= len(presets):
+        raise HTTPException(status_code=404, detail=f"No preset {n}")
+    p = presets[n - 1]
+    await _ensure_garage_device()
+    if soundtouch:
+        try:
+            await soundtouch.prepare(state.volume)
+        except Exception as e:
+            log.warning("SoundTouch prepare failed: %s", e)
+    _mark_user_stop()  # leaving our queue on purpose: no auto-advance
+    await dlna_set_raw_uri(p["url"], p["name"], p.get("type", "audio/mpeg"))
+    await dlna_play()
+    await _push_volume()  # SoundTouch renderer volume is 0 after standby
+    if soundtouch:
+        asyncio.create_task(_delayed_push_volume(3.0))
+    log.info("Garage preset %d: %s", n, p["name"])
+    return {"ok": True, "preset": n, "name": p["name"]}
+
+
+@app.post("/api/garage/power")
+async def garage_power():
+    """Music off: SoundTouch to standby (a plain DLNA stop otherwise)."""
+    _mark_user_stop()
+    if soundtouch:
+        await soundtouch.standby()
+    elif _device_ready():
+        await dlna_stop()
+    return {"ok": True}
 
 
 @app.get("/api/devices")
@@ -1106,6 +1472,11 @@ async def api_volume(req: VolumeRequest):
     global _volume_set_ts, _volume_push_pending
     level = max(0, min(100, req.level))
     _volume_set_ts = time.monotonic()
+    if soundtouch:  # the speaker's own volume; the renderer follows while playing
+        try:
+            await soundtouch.set_volume(level)
+        except Exception as e:
+            log.warning("SoundTouch set_volume failed: %s", e)
     await dlna_set_volume(level)
     state.volume = level
     _volume_push_pending = False
@@ -1204,6 +1575,22 @@ _user_stop_ts = 0.0  # time.monotonic() of last user-initiated stop
 _uri_change_ts = 0.0  # time.monotonic() of last SetAVTransportURI we issued
 USER_STOP_WINDOW = 10.0  # suppress auto-advance this long after a user stop
 URI_SYNC_GRACE = 5.0  # skip gapless index sync this long after we set a URI
+_playing_foreign = False  # renderer's last PLAYING URI was not one of ours
+
+
+def _is_foreign_uri(uri: str) -> bool:
+    """True if the renderer is playing something bulb_voice did not send
+    (Home Assistant radio/announcement, another app). Unknown/empty URIs count
+    as ours, so renderers that don't report TrackURI behave as before."""
+    return bool(uri) and not uri.startswith(f"{BASE_URL}/stream/")
+
+
+async def _note_playback_owner():
+    global _playing_foreign
+    try:
+        _playing_foreign = _is_foreign_uri((await dlna_get_position()).get("track_uri", ""))
+    except Exception as e:
+        log.debug("TrackURI read failed: %s", e)
 
 
 def _mark_user_stop():
@@ -1252,6 +1639,7 @@ async def auto_advance_loop():
         try:
             ts = await dlna_get_transport_state()
             if ts == "PLAYING":
+                await _note_playback_owner()
                 try:
                     await _sync_index_with_device()
                 except Exception as e:
@@ -1261,6 +1649,23 @@ async def auto_advance_loop():
                     log.debug("Ignoring STOPPED transition after user stop")
                     _last_transport_state = ts
                     continue
+                # Someone else's stream ended (e.g. a Home Assistant radio
+                # preset or announcement on the same renderer): not our queue.
+                if _playing_foreign:
+                    log.info("Renderer stopped after a stream we didn't send; not advancing")
+                    _last_transport_state = ts
+                    continue
+                # A SoundTouch put into standby (HA "music off", power key) is a
+                # user stop; advancing would wake the speaker straight back up.
+                if soundtouch:
+                    try:
+                        in_standby = await soundtouch.is_standby()
+                    except Exception:
+                        in_standby = False
+                    if in_standby:
+                        log.info("SoundTouch went to standby; treating as a user stop")
+                        _last_transport_state = ts
+                        continue
                 next_idx = _get_next_index()
                 if next_idx is not None:
                     state.current_index = next_idx
@@ -1340,11 +1745,19 @@ async def _play_current():
     if not _device_ready():
         raise HTTPException(status_code=503, detail="Device not connected")
     track = state.queue[state.current_index]
+    if soundtouch:
+        # Wake from standby, unmute, set its own volume — or the stream is silent.
+        try:
+            await soundtouch.prepare(state.volume)
+        except Exception as e:
+            log.warning("SoundTouch prepare failed: %s", e)
     _uri_change_ts = time.monotonic()
     await dlna_set_uri(track)
     await dlna_play()
-    if _volume_push_pending:
-        await _push_volume()
+    if _volume_push_pending or soundtouch:
+        await _push_volume()  # SoundTouch renderer volume resets to 0 in standby
+    if soundtouch:
+        asyncio.create_task(_delayed_push_volume(3.0))
     # Pre-load next track for gapless playback
     await _preload_next()
 
@@ -1422,6 +1835,11 @@ def _track_dict(t: Track) -> dict:
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR))
+
+
+@app.get("/garage")
+async def garage_page():
+    return FileResponse(STATIC_DIR / "garage.html")
 
 
 @app.get("/")

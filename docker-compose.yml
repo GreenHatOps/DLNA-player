@@ -4,4 +4,9 @@ services:
     network_mode: host
     volumes:
       - ./cache:/app/cache
+    environment:
+      # Garage Bose SoundTouch SA-4: its renderer never answers the SSDP search.
+      - BV_STATIC_DEVICES=http://192.168.1.37:8091/XD/BO5EBO5E-F00D-F00D-FEED-000C8AAC574C.xml
+      # Evict oldest downloads (never queued ones) beyond this many MB.
+      - BV_CACHE_MAX_MB=3000
     restart: unless-stopped

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Garage">
+<meta name="theme-color" content="#0b0c0e">
+<link rel="apple-touch-icon" href="/static/garage-icon.png">
+<title>Garage</title>
+<link rel="stylesheet" href="/static/garage.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">Garage</div>
+  <button id="device-pill" class="pill" type="button">…</button>
+  <span id="ytm-pill" class="pill ghost" title="YouTube Music">YT Music</span>
+</header>
+
+<main>
+  <section class="controller-wrap">
+    <svg id="ctl" viewBox="0 0 600 600" aria-label="Garage controller"></svg>
+  </section>
+
+  <section class="transport" aria-label="Playback">
+    <button id="t-prev" class="tbtn" type="button" aria-label="Previous">⏮</button>
+    <button id="t-play" class="tbtn big" type="button" aria-label="Play or pause">⏯</button>
+    <button id="t-next" class="tbtn" type="button" aria-label="Next">⏭</button>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="foryou" type="button">For you</button>
+    <button class="tab" data-tab="genres" type="button">Genres</button>
+    <button class="tab" data-tab="search" type="button">Search</button>
+    <button class="tab" data-tab="queue" type="button">Queue</button>
+  </nav>
+
+  <section id="tab-foryou" class="panel active"></section>
+
+  <section id="tab-genres" class="panel">
+    <div id="genre-chips" class="chips"></div>
+    <div id="genre-head" class="subhead hidden">
+      <button id="genre-back" class="link" type="button">‹ Genres</button>
+      <span id="genre-title"></span>
+    </div>
+    <div id="genre-items" class="list"></div>
+  </section>
+
+  <section id="tab-search" class="panel">
+    <form id="search-form" class="search" autocomplete="off">
+      <input id="search-q" type="search" placeholder="Songs, artists, albums…" enterkeyhint="search">
+      <button type="submit">Search</button>
+    </form>
+    <div class="seg" id="search-kind">
+      <button type="button" data-kind="songs" class="on">Songs</button>
+      <button type="button" data-kind="albums">Albums</button>
+      <button type="button" data-kind="playlists">Playlists</button>
+      <button type="button" data-kind="videos">Videos</button>
+    </div>
+    <div id="search-results" class="list"></div>
+  </section>
+
+  <section id="tab-queue" class="panel">
+    <div id="queue-list" class="list"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/static/garage.js"></script>
+</body>
+</html>
