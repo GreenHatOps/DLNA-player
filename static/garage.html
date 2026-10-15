@@ -14,14 +14,49 @@
 </head>
 <body>
 <header class="top">
+  <a class="pill" href="/#speakers" title="Back to Bulb Voice and pick a speaker">‹ Speakers</a>
   <div class="brand">Garage</div>
   <button id="device-pill" class="pill" type="button">…</button>
   <span id="ytm-pill" class="pill ghost" title="YouTube Music">YT Music</span>
 </header>
 
 <main>
-  <section class="controller-wrap">
+  <div class="skin" role="group" aria-label="Controller style">
+    <button type="button" data-skin="ring">Ring</button>
+    <button type="button" data-skin="dial">FM dial</button>
+  </div>
+
+  <section class="controller-wrap" id="ring-wrap">
     <svg id="ctl" viewBox="0 0 600 600" aria-label="Garage controller"></svg>
+  </section>
+
+  <!-- FM dial: 2010s Mercedes (W212 Audio 20) radio screen over the same presets -->
+  <section class="dial-wrap hidden" id="dial-wrap">
+    <div class="bezel">
+      <div class="lcd" id="lcd">
+        <div class="sbar"><span id="d-clock"></span><span><span id="d-dev"></span><span class="sig" aria-hidden="true"><i></i><i></i><i></i><i></i></span></span></div>
+        <div class="bar" aria-hidden="true"><span>Navi</span><span class="sel">Audio</span><span>Tel</span><span>Video</span><span>System</span></div>
+        <div class="fstrip" id="d-strip" aria-live="polite"></div>
+        <div class="dialp" id="d-panel">
+          <div class="needle"></div>
+          <div class="mem" id="d-mem" hidden></div>
+          <div class="vol" id="d-vol" hidden>
+            <span class="vl"><span>Volume</span><span id="d-voldev"></span></span>
+            <span class="vn" id="d-vn"></span>
+            <div class="vbar"><i id="d-vfill"></i></div>
+          </div>
+        </div>
+        <div class="scale"><canvas id="d-scale" aria-hidden="true"></canvas></div>
+        <div class="bar keys" role="group" aria-label="Radio keys">
+          <button type="button" id="k-radio">Radio</button><button type="button" id="k-mem">Memory</button><button type="button" id="k-info">Info</button><button type="button" id="k-fm">FM</button><button type="button" id="k-sound">Sound</button>
+        </div>
+      </div>
+    </div>
+    <div class="dial">
+      <div class="side"><button class="sbtn" type="button" id="d-seekdn" aria-label="Previous station">◂◂</button>Seek</div>
+      <div class="dknob" id="d-knob" tabindex="0" role="slider" aria-label="Tuning wheel"><canvas id="d-knobc"></canvas></div>
+      <div class="side"><button class="sbtn" type="button" id="d-seekup" aria-label="Next station">▸▸</button>Seek</div>
+    </div>
   </section>
 
   <section class="transport" aria-label="Playback">

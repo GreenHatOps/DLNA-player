@@ -1,5 +1,6 @@
 /* Garage controller — iPhone home-screen app for the garage Bose SoundTouch.
  * Round controller (rotary volume ring, 6 radio presets with preview, power)
+ * or the FM dial skin (car-radio screen + tuning knob over the same presets)
  * + YouTube Music: For you / Genres / Search / Queue.
  * All data from the server is written with textContent / setAttribute — never
  * innerHTML — because titles come from YouTube. */
@@ -220,6 +221,286 @@ async function playPreset(n) {
   setTimeout(refresh, 1500);
 }
 
+/* --------------------------------------------------------------- FM dial
+ * Car-radio skin over the same presets: each preset sits at a "freq" on an
+ * 87.5-108 band (garage_presets.json), the knob tunes, a station plays once
+ * the knob rests on it. Sound turns the knob into the volume control. */
+const BAND_LO = 87.5, BAND_HI = 108;
+const SNAP_MHZ = 0.3;        // a station locks within this distance of the needle
+const DETENT_RAD = 0.22;     // knob turn per 0.1 MHz (or per volume step)
+const TUNE_MS = 700;         // rest this long on a station before it plays
+const SOUND_IDLE_MS = 8000;  // Sound mode falls back to the radio when untouched
+const D = { key: null, stations: [], labels: [], freq: null, angle: 0, info: false, sound: false,
+  last: null, acc: 0, tuneTimer: null, soundTimer: null, target: null, targetUntil: 0, lastPreset: undefined, gliding: false };
+
+const onAir = () => D.stations.find((s) => S.garage && s.n === S.garage.preset) || null;
+function nearestStation(f) {
+  let best = null;
+  for (const s of D.stations) {
+    const d = Math.abs(s.freq - f);
+    if (d <= SNAP_MHZ && (!best || d < Math.abs(best.freq - f))) best = s;
+  }
+  return best;
+}
+
+function buildDial() {
+  const st = (S.garage && S.garage.stations) || [];
+  const key = JSON.stringify(st);
+  if (key === D.key) return;
+  const first = !D.stations.length;
+  D.key = key;
+  D.stations = [...st].sort((a, b) => a.freq - b.freq);
+  D.labels.forEach((l) => l.remove());
+  D.labels = D.stations.map((s, i) => {
+    const d = el("div", { class: `stn r${i % 2}` });
+    d.append(el("b", {}, String(s.n)), el("i", {}, "·"), document.createTextNode(s.ps));
+    $("d-panel").append(d);
+    return d;
+  });
+  $("d-mem").replaceChildren(...[...st].sort((a, b) => a.n - b.n).map((s) => {
+    const b = el("button", { type: "button", "data-n": s.n, onclick: () => { $("d-mem").hidden = true; tuneStation(s); } });
+    b.append(el("b", {}, String(s.n)), document.createTextNode(s.ps), el("i", {}, s.freq.toFixed(1)));
+    return b;
+  }));
+  if (D.freq == null || first) D.freq = (onAir() || D.stations[0] || { freq: 98 }).freq;
+}
+
+function drawScale(nx, k) {
+  const c = $("d-scale"), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  c.width = r.width * dpr; c.height = r.height * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const W = r.width, H = r.height, off = $("d-panel").offsetLeft, pw = $("d-panel").clientWidth;
+  g.clearRect(0, 0, W, H);
+  g.strokeStyle = "#fff"; g.fillStyle = "#fff"; g.lineWidth = 1; g.textAlign = "center";
+  g.font = `${Math.max(8, H * 0.42)}px "Avenir Next Condensed", "Roboto Condensed", "Arial Narrow", sans-serif`;
+  const tick = (X, major, label) => {
+    X = Math.round(X) + 0.5;
+    if (X < -20 || X > W + 20) return;
+    g.globalAlpha = major ? 1 : 0.75;
+    g.beginPath(); g.moveTo(X, 0); g.lineTo(X, major ? H * 0.45 : H * 0.22); g.stroke();
+    if (label != null) { g.globalAlpha = 1; g.fillText(label, X, H - 2); }
+  };
+  let P;
+  if (D.sound) {                       // fixed 0-100 volume scale
+    const vx = (v) => off + 8 + (v / 100) * (pw - 16);
+    for (let v = 0; v <= 100; v += 5) tick(vx(v), v % 25 === 0, v % 25 === 0 ? v : null);
+    P = vx(S.pending ?? (S.garage && S.garage.volume) ?? 0);
+  } else {                             // band scale slides behind the fixed needle
+    for (let i = Math.ceil(BAND_LO * 2); i <= BAND_HI * 2; i++) {   // half-MHz ticks, a number every 2 MHz
+      tick(off + nx + (i / 2 - D.freq) * k, i % 2 === 0, i % 4 === 0 ? i / 2 : null);
+    }
+    P = off + nx;
+  }
+  g.globalAlpha = 1; g.fillStyle = "#e01b1b"; g.shadowColor = "#e01b1b"; g.shadowBlur = 5;
+  g.beginPath(); g.moveTo(P - 4, 0); g.lineTo(P + 4, 0); g.lineTo(P, H * 0.5); g.closePath(); g.fill();
+}
+
+function drawKnob() {
+  const c = $("d-knobc"), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  if (!r.width) return;
+  c.width = r.width * dpr; c.height = r.height * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr);
+  const S2 = r.width, C2 = S2 / 2, R = S2 / 2 - 2;
+  let gr = g.createLinearGradient(0, 0, S2, S2);            // chrome rim
+  gr.addColorStop(0, "#e4e8ec"); gr.addColorStop(0.45, "#5a6068"); gr.addColorStop(0.55, "#2a2e33"); gr.addColorStop(1, "#c9ced4");
+  g.fillStyle = gr; g.beginPath(); g.arc(C2, C2, R, 0, 7); g.fill();
+  g.fillStyle = "#16191d"; g.beginPath(); g.arc(C2, C2, R - 6, 0, 7); g.fill();
+  g.save(); g.translate(C2, C2); g.rotate(D.angle);           // knurled grip
+  for (let i = 0; i < 72; i++) {
+    const a = (i / 72) * Math.PI * 2, lit = 0.5 + 0.5 * Math.cos(a + D.angle - 2.3);
+    g.strokeStyle = `rgba(${(150 + 80 * lit) | 0},${(155 + 80 * lit) | 0},${(165 + 75 * lit) | 0},${0.25 + 0.5 * lit})`;
+    g.lineWidth = 1.4;
+    g.beginPath(); g.moveTo(Math.cos(a) * (R - 8), Math.sin(a) * (R - 8)); g.lineTo(Math.cos(a) * (R - 22), Math.sin(a) * (R - 22)); g.stroke();
+  }
+  g.restore();
+  gr = g.createRadialGradient(C2 - R * 0.25, C2 - R * 0.3, 4, C2, C2, R - 22);  // satin cap
+  gr.addColorStop(0, "#3b4047"); gr.addColorStop(1, "#0f1114");
+  g.fillStyle = gr; g.beginPath(); g.arc(C2, C2, R - 24, 0, 7); g.fill();
+  g.save(); g.translate(C2, C2); g.rotate(D.angle - Math.PI / 2);
+  g.fillStyle = "#e01b1b"; g.shadowColor = "#e01b1b"; g.shadowBlur = 6;
+  g.beginPath(); g.arc(R - 36, 0, 3.2, 0, 7); g.fill(); g.restore();
+  g.fillStyle = "#8a9096"; g.font = "600 11px -apple-system, Roboto, sans-serif"; g.textAlign = "center";
+  g.fillText(D.sound ? "VOLUME" : "TUNE", C2, C2 + 4);
+}
+
+function statusText(g) {
+  if (!g.connected) return "Not connected";
+  if (g.standby) return "Standby";
+  if (g.track) return [g.track.title, g.track.artist].filter(Boolean).join(" · ");
+  return g.source === "AIRPLAY" ? "AirPlay" : g.source || "Ready";
+}
+
+function drawDial() {
+  const g = S.garage || {}, panel = $("d-panel"), lcd = $("lcd");
+  const s = nearestStation(D.freq), air = onAir();
+  const W = panel.clientWidth, nx = W * 0.4, k = W * 0.11;  // needle at 40%; px per MHz keeps ~3 MHz neighbours in view
+  D.stations.forEach((st, i) => {
+    D.labels[i].style.left = `${nx + (st.freq - D.freq) * k}px`;
+    D.labels[i].classList.toggle("cur", st === s);
+    D.labels[i].classList.toggle("air", !!air && st.n === air.n);
+  });
+  lcd.classList.toggle("seek", !s && !D.sound);
+  lcd.classList.toggle("snd", D.sound);
+  lcd.classList.toggle("off", isOff());
+  const vol = S.pending ?? g.volume;
+  let strip;
+  if (D.sound) strip = `Sound · Volume ${vol ?? "–"}`;
+  else if (D.info) strip = air && !g.standby ? `${air.name} · Preset ${air.n}` : statusText(g);
+  else strip = `FM ${(s ? s.freq : D.freq).toFixed(1)} MHz`;
+  $("d-strip").replaceChildren(el("span", {}, strip));
+  $("d-dev").textContent = !g.connected ? "Not connected" : g.standby ? "Standby" : g.device || "";
+  $("d-voldev").textContent = g.device || "";
+  $("d-vol").hidden = !D.sound;
+  $("d-vn").textContent = vol ?? "–";
+  $("d-vfill").style.width = `${Math.max(0, Math.min(100, vol || 0))}%`;
+  $("d-mem").querySelectorAll("button").forEach((b) => b.classList.toggle("on", +b.dataset.n === g.preset));
+  $("k-mem").classList.toggle("sel", !$("d-mem").hidden);
+  $("k-info").classList.toggle("sel", D.info && !D.sound);
+  $("k-sound").classList.toggle("sel", D.sound);
+  const kn = $("d-knob");
+  kn.setAttribute("aria-label", D.sound ? "Volume wheel" : "Tuning wheel");
+  kn.setAttribute("aria-valuemin", D.sound ? 0 : BAND_LO);
+  kn.setAttribute("aria-valuemax", D.sound ? 100 : BAND_HI);
+  kn.setAttribute("aria-valuenow", D.sound ? vol ?? 0 : (s ? s.freq : D.freq).toFixed(1));
+  kn.setAttribute("aria-valuetext", D.sound ? `Volume ${vol ?? 0}` : s ? `${s.name}, ${s.freq.toFixed(1)}` : `${D.freq.toFixed(1)} MHz`);
+  drawScale(nx, k);
+  drawKnob();
+}
+
+function renderDial() {
+  if (S.skin !== "dial") return;
+  const g = S.garage || {};
+  buildDial();
+  if (D.target && (g.preset === D.target.n || Date.now() > D.targetUntil)) D.target = null;
+  // follow a station change made elsewhere (HA, the ring, another phone) unless the user is tuning
+  const changed = g.preset !== D.lastPreset;
+  D.lastPreset = g.preset;
+  const a = onAir();
+  if (changed && a && D.last == null && !D.tuneTimer && !D.target && !D.gliding && a.freq !== D.freq) glide(a.freq);
+  else drawDial();
+}
+
+function glide(f, done) {
+  const f0 = D.freq, a0 = D.angle, t0 = performance.now();
+  const dur = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 450;
+  D.gliding = true;
+  const frame = (now) => {
+    if (D.last != null) { D.gliding = false; return; }   // the user grabbed the knob
+    const t = dur ? Math.min(1, (now - t0) / dur) : 1, e = 1 - Math.pow(1 - t, 3);
+    D.freq = f0 + (f - f0) * e; D.angle = a0 + (f - f0) * 2.2 * e;
+    if (t < 1) { drawDial(); requestAnimationFrame(frame); return; }
+    D.freq = f; D.gliding = false; drawDial();
+    if (done) done();
+  };
+  requestAnimationFrame(frame);
+}
+
+function tuneStation(s) {
+  clearTimeout(D.tuneTimer); D.tuneTimer = null;
+  if (D.sound) setSound(false);
+  glide(s.freq, () => {
+    if (S.garage && S.garage.preset === s.n && !S.garage.standby) return;
+    D.target = s; D.targetUntil = Date.now() + 10000;
+    playPreset(s.n);
+  });
+}
+
+function settleDial() {
+  clearTimeout(D.tuneTimer); D.tuneTimer = null;
+  if (D.sound) return;
+  const s = nearestStation(D.freq);
+  if (!s) return;
+  D.tuneTimer = setTimeout(() => { D.tuneTimer = null; tuneStation(s); }, TUNE_MS);
+}
+
+function dialVolume(dir) {
+  armSound();
+  if (isOff()) return;
+  const v = Math.max(0, Math.min(100, (S.pending ?? S.garage.volume ?? 25) + dir));
+  if (v === S.pending) return;
+  S.pending = v;
+  if (Date.now() - (D.volSent || 0) > SEND_MS) { D.volSent = Date.now(); sendVolume(v).catch(() => {}); }
+  clearTimeout(S.stepTimer);
+  S.stepTimer = setTimeout(async () => { await act(sendVolume(v)); S.garage.volume = v; S.pending = null; renderDial(); }, 300);
+}
+
+function detent(dir) {
+  if (D.sound) dialVolume(dir);
+  else D.freq = Math.min(BAND_HI, Math.max(BAND_LO, Math.round((D.freq + dir * 0.1) * 10) / 10));
+  if (navigator.vibrate) navigator.vibrate(3);
+}
+
+function armSound() { clearTimeout(D.soundTimer); D.soundTimer = setTimeout(() => setSound(false), SOUND_IDLE_MS); }
+function setSound(on) {
+  D.sound = on;
+  clearTimeout(D.soundTimer);
+  if (on) { $("d-mem").hidden = true; clearTimeout(D.tuneTimer); D.tuneTimer = null; armSound(); }
+  drawDial();
+}
+
+function knobAngle(e) {
+  const r = $("d-knob").getBoundingClientRect();
+  return Math.atan2(e.clientY - r.top - r.height / 2, e.clientX - r.left - r.width / 2);
+}
+function bindDial() {
+  const kn = $("d-knob");
+  kn.addEventListener("pointerdown", (e) => {
+    try { kn.setPointerCapture(e.pointerId); } catch (_) { /* optional */ }
+    D.last = knobAngle(e); D.acc = 0;
+    clearTimeout(D.tuneTimer); D.tuneTimer = null;
+  });
+  kn.addEventListener("pointermove", (e) => {
+    if (D.last == null) return;
+    const a = knobAngle(e);
+    let d = a - D.last;
+    if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI;
+    D.last = a; D.acc += d; D.angle += d;
+    while (Math.abs(D.acc) >= DETENT_RAD) { const s = Math.sign(D.acc); D.acc -= s * DETENT_RAD; detent(s); }
+    drawDial();
+  });
+  const end = () => {
+    if (D.last == null) return;
+    D.last = null; D.acc = 0;
+    if (!D.sound) { const s = nearestStation(D.freq); if (s) D.freq = s.freq; }
+    drawDial(); settleDial();
+  };
+  kn.addEventListener("pointerup", end);
+  kn.addEventListener("pointercancel", end);
+  const nudge = (dir) => { detent(dir); D.angle += dir * DETENT_RAD; drawDial(); settleDial(); };
+  kn.addEventListener("wheel", (e) => { e.preventDefault(); nudge(e.deltaY < 0 ? 1 : -1); }, { passive: false });
+  kn.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") { e.preventDefault(); nudge(1); }
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") { e.preventDefault(); nudge(-1); }
+  });
+  const seek = (dir) => {
+    if (!D.stations.length) return;
+    const list = dir > 0 ? D.stations.filter((s) => s.freq > D.freq + 0.05) : D.stations.filter((s) => s.freq < D.freq - 0.05).reverse();
+    tuneStation(list[0] || (dir > 0 ? D.stations[0] : D.stations[D.stations.length - 1]));
+  };
+  $("d-seekdn").addEventListener("click", () => seek(-1));
+  $("d-seekup").addEventListener("click", () => seek(1));
+  const radio = () => { if (D.sound) setSound(false); };
+  $("k-radio").addEventListener("click", () => { $("d-mem").hidden = true; D.info = false; radio(); drawDial(); });
+  $("k-mem").addEventListener("click", () => { radio(); $("d-mem").hidden = !$("d-mem").hidden; drawDial(); });
+  $("k-info").addEventListener("click", () => { radio(); D.info = !D.info; drawDial(); });
+  $("k-fm").addEventListener("click", () => { radio(); toast("FM only: every station is an internet stream"); });
+  $("k-sound").addEventListener("click", () => setSound(!D.sound));
+  const clock = () => { const d = new Date(); $("d-clock").textContent = `${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`; };
+  clock(); setInterval(clock, 15000);
+  window.addEventListener("resize", () => { if (S.skin === "dial") drawDial(); });
+}
+
+function setSkin(name) {
+  S.skin = name === "ring" ? "ring" : "dial";
+  $("ring-wrap").classList.toggle("hidden", S.skin !== "ring");
+  $("dial-wrap").classList.toggle("hidden", S.skin !== "dial");
+  document.querySelectorAll(".skin button").forEach((b) => b.classList.toggle("on", b.dataset.skin === S.skin));
+  try { localStorage.setItem("garage.skin", S.skin); } catch (_) { /* private mode */ }
+  if (S.skin === "dial") renderDial();
+  else { clearTimeout(D.tuneTimer); D.tuneTimer = null; if (D.sound) setSound(false); renderDisplay(); }
+}
+document.querySelectorAll(".skin button").forEach((b) => b.addEventListener("click", () => setSkin(b.dataset.skin)));
+
 /* ------------------------------------------------------------ transport */
 $("t-prev").addEventListener("click", () => act(api("/api/prev", { method: "POST" })).then(refresh));
 $("t-next").addEventListener("click", () => act(api("/api/next", { method: "POST" })).then(refresh));
@@ -385,6 +666,7 @@ async function refresh() {
     if (S.garage.connected) { pill.textContent = S.garage.device; pill.className = "pill ok"; }
     else { pill.textContent = `Connect ${S.garage.device}`; pill.className = "pill warn"; }
     if (S.drag == null) renderDisplay();
+    renderDial();
   } catch (e) { /* server restarting: keep last view */ }
   if ($("tab-queue").classList.contains("active")) {
     try { S.status = await api("/api/status"); renderQueue(); } catch (_) { /* ignore */ }
@@ -396,8 +678,12 @@ $("device-pill").addEventListener("click", async () => {
 
 async function init() {
   buildController();
+  bindDial();
   S.garage = { presets: [], connected: false };
   renderDisplay();
+  let skin = "dial";
+  try { skin = localStorage.getItem("garage.skin") || "dial"; } catch (_) { /* private mode */ }
+  setSkin(skin);
   try {
     S.ytm = await api("/api/ytm/status");
     const p = $("ytm-pill");

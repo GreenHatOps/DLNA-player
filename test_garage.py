@@ -517,6 +517,31 @@ class TestGarage(_STBase):
             s = await app.garage_state()
         assert s["connected"] and s["preset"] == 4 and s["volume"] == 33 and s["standby"] is False
 
+    def test_dial_stations_from_config(self):
+        st = app._dial_stations(app._garage_cfg()["presets"])
+        assert [s["n"] for s in st] == [1, 2, 3, 4, 5, 6]
+        assert st[3] == {"n": 4, "name": "Magic FM", "freq": 89.5, "ps": "MAGIC FM"}
+        assert all(87.5 <= s["freq"] <= 108 and len(s["ps"]) <= 8 for s in st)
+        assert len({s["freq"] for s in st}) == len(st), "two presets on one frequency"
+
+    def test_dial_stations_fill_missing_or_bad_values(self):
+        presets = [{"name": "Radio Guerrilla", "url": "http://a/"},
+                   {"name": "B", "url": "http://b/", "freq": 150},
+                   {"name": "C", "url": "http://c/", "freq": True},
+                   {"name": "D", "url": "http://d/", "freq": 99, "ps": "TOO LONG NAME"}]
+        st = app._dial_stations(presets)
+        assert st[0]["ps"] == "RADIO GU"
+        assert [s["freq"] for s in st[:3]] == [90.9, 95.6, 100.4]   # spread across the band
+        assert st[3]["freq"] == 99.0 and st[3]["ps"] == "TOO LONG"
+        assert app._dial_stations([]) == []
+
+    @pytest.mark.asyncio
+    async def test_state_lists_dial_stations_even_when_disconnected(self):
+        with patch.object(app, "device", None):
+            s = await app.garage_state()
+        assert not s["connected"]
+        assert [x["name"] for x in s["stations"]] == s["presets"]
+
     @pytest.mark.asyncio
     async def test_power_puts_soundtouch_in_standby(self):
         app.soundtouch = fake_st()
@@ -525,12 +550,33 @@ class TestGarage(_STBase):
         app.soundtouch.standby.assert_awaited_once()
 
 
+class TestGarageSwitch:
+    @pytest.mark.asyncio
+    async def test_devices_names_the_garage_speaker(self):
+        r = await app.api_devices()
+        assert r["garage"] == "Bose_out"
+
+    def test_main_app_switches_to_garage_page(self):
+        js = (app.STATIC_DIR / "app.js").read_text()
+        assert 'location.replace("/garage")' in js and 'location.href = "/garage"' in js
+        assert '"#speakers"' in js
+        assert 'href="/#speakers"' in (app.STATIC_DIR / "garage.html").read_text()
+
+
 class TestGaragePage:
     def test_garage_page_and_assets_exist(self):
         html = (app.STATIC_DIR / "garage.html").read_text()
         for asset in ("/static/garage.css", "/static/garage.js"):
             assert asset in html
             assert (app.STATIC_DIR / asset.split("/")[-1]).exists()
+
+    def test_dial_elements_used_by_js_exist(self):
+        import re
+        html = (app.STATIC_DIR / "garage.html").read_text()
+        js = (app.STATIC_DIR / "garage.js").read_text()
+        ids = set(re.findall(r'\$\("([\w-]+)"\)', js))
+        missing = [i for i in ids if f'id="{i}"' not in html]
+        assert not missing, missing
 
     def test_no_innerhtml_with_server_data(self):
         """YouTube titles are untrusted: the only innerHTML is the static SVG defs."""

@@ -480,11 +480,34 @@ els.btnRefreshDevices.addEventListener("click", async () => {
   els.btnRefreshDevices.disabled = false;
 });
 
+// The garage speaker has its own car-radio page (/garage): picking it there,
+// or opening the app while it is the active speaker, switches to that page.
+// /#speakers comes back from /garage with the picker open and no redirect.
+let garageDevice = null;
+
 async function refreshDeviceList() {
   try {
     const data = await api("GET", "/devices");
+    garageDevice = data.garage || null;
     renderDeviceList(data.devices, data.current);
   } catch {}
+}
+
+async function garageOnStart() {
+  const fromGarage = location.hash === "#speakers";
+  if (fromGarage) history.replaceState(null, "", location.pathname + location.search);
+  try {
+    const [d, s] = await Promise.all([api("GET", "/devices"), api("GET", "/status")]);
+    garageDevice = d.garage || null;
+    if (!fromGarage && garageDevice && s.device_name === garageDevice) {
+      location.replace("/garage");
+      return;
+    }
+  } catch {}
+  if (fromGarage) {
+    els.devicePicker.classList.remove("hidden");
+    refreshDeviceList();
+  }
 }
 
 function renderDeviceList(devices, current) {
@@ -502,6 +525,10 @@ function renderDeviceList(devices, current) {
     `;
     li.addEventListener("click", async () => {
       await send("POST", "/devices/select", { name: d.name });
+      if (garageDevice && d.name === garageDevice) {
+        location.href = "/garage";
+        return;
+      }
       els.devicePicker.classList.add("hidden");
       poll();
     });
@@ -633,6 +660,7 @@ async function fetchLogs() {
 }
 
 // --- Start ---
+garageOnStart();
 poll();
 setInterval(poll, 2000);
 setInterval(tickDisplay, 500);

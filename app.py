@@ -1053,6 +1053,20 @@ def _garage_cfg() -> dict:
         return {"device": "Bose_out", "presets": []}
 
 
+def _dial_stations(presets: list) -> list:
+    """The presets as stations on the garage page's FM dial. "freq" (MHz) and
+    "ps" (8-char station name, like FM RDS) are optional in garage_presets.json:
+    a missing or out-of-band freq is spread evenly across 87.5-108."""
+    out = []
+    for i, p in enumerate(presets):
+        f = p.get("freq")
+        if not isinstance(f, (int, float)) or isinstance(f, bool) or not 87.5 <= f <= 108:
+            f = round(88.5 + (i + 0.5) * 19 / len(presets), 1)
+        ps = str(p.get("ps") or p["name"].upper())[:8]
+        out.append({"n": i + 1, "name": p["name"], "freq": float(f), "ps": ps})
+    return out
+
+
 async def _ensure_garage_device() -> str:
     """Make the garage speaker the active renderer (bulb_voice drives one
     device at a time). Returns its name; 503 if it is not known/reachable."""
@@ -1094,7 +1108,8 @@ async def garage_state():
     connected = device is not None and device.friendly_name == cfg.get("device") and _device_ready()
     out = {"device": cfg.get("device"), "connected": connected,
            "active_device": device.friendly_name if device else None,
-           "presets": [p["name"] for p in presets], "standby": None, "source": None,
+           "presets": [p["name"] for p in presets], "stations": _dial_stations(presets),
+           "standby": None, "source": None,
            "volume": state.volume, "preset": None, "transport": None, "track": None}
     if not connected:
         return out
@@ -1163,6 +1178,7 @@ async def api_devices():
     return {
         "devices": list(discovered_devices.values()),
         "current": current_name,
+        "garage": _garage_cfg().get("device"),  # this speaker opens /garage in the main app
     }
 
 
