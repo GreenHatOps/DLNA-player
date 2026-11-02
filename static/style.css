@@ -85,22 +85,19 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
 }
 .key:active, .device-btn:active, .picker-refresh:active, #btn-add:active,
 .result-item .r-add:active, .queue-item .q-play:active, .device-item:active,
-.key[aria-pressed="true"], .device-item.active {
+.key[aria-pressed="true"], .key.lit, .device-item.active {
   transform: translateY(2px);
   box-shadow: var(--pressed);
 }
-/* Latched: an LED inboard of the top-right corner, clear of the 12px curve */
-.key[aria-pressed="true"]::after, .device-item.active::after {
-  content: "";
-  position: absolute;
-  top: 8px;
-  right: 12px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--needle);
+/* Switched on (Play while playing, latched Repeat / Shuffle, the selected speaker):
+   the key stays pushed in and an LED behind the face lights its icon and legend. */
+.key[aria-pressed="true"], .key.lit, .device-item.active .d-name {
+  color: var(--ok);
+  text-shadow: 0 0 6px rgba(76, 194, 122, .55);
 }
-.key.on[aria-pressed="true"]::after, .device-item.active::after { background: var(--ok); }
+.key[aria-pressed="true"] svg, .key.lit svg {
+  filter: drop-shadow(0 0 4px rgba(76, 194, 122, .6));
+}
 .key:focus-visible, .device-btn:focus-visible, .picker-refresh:focus-visible, #btn-add:focus-visible,
 .result-item .r-add:focus-visible, .queue-item .q-play:focus-visible, .device-item:focus-visible,
 .log-toggle:focus-visible, .search-close:focus-visible, .queue-item .q-remove:focus-visible {
@@ -391,11 +388,16 @@ header h1 {
 
 /* The ruler is a tuning scale: printed ticks, a neutral window for the browsing
    position, and the red needle at the playing track (tap it to return). */
-#queue-scroll {
+#queue-scroll {                /* drag left/right to move through the queue fast */
   position: relative;
   height: 44px;
   margin: 2px 2px 0;
+  touch-action: pan-y;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
 }
+#queue-scroll.dragging { cursor: grabbing; }
 #queue-scroll.hidden, #queue-playing.hidden { display: none; }
 #queue-scroll::before {
   content: "";
@@ -490,17 +492,9 @@ header h1 {
 }
 
 .queue-item.focus { border-color: var(--edge); background-color: var(--key); }
-/* The playing card carries the needle mark beside its number */
+/* The playing card is outlined in the needle red, following its rounded corners */
+.queue-item.active { border: 2px solid var(--needle); }
 .queue-item.active .q-idx { color: var(--text); }
-.queue-item.active .q-idx::before {
-  content: "";
-  display: inline-block;
-  width: 2px;
-  height: 12px;
-  margin-right: 8px;
-  vertical-align: -1px;
-  background: var(--needle);
-}
 .queue-item:not(.focus) .q-remove,
 .queue-item:not(.focus) .q-play { display: none; }
 

@@ -120,6 +120,7 @@ async function poll() {
     els.iconPlay.style.display = isPlaying ? "none" : "block";
     els.iconPause.style.display = isPlaying ? "block" : "none";
     els.playLabel.textContent = isPlaying ? "Pause" : "Play";
+    els.btnPlay.classList.toggle("lit", isPlaying);   // pushed in and backlit while playing
     els.btnPlay.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
 
     if (!volumeTimeout) {
@@ -336,6 +337,7 @@ let snapTimer = null;
 els.queueList.addEventListener("scroll", () => {
   if (!layoutRaf) layoutRaf = requestAnimationFrame(() => { layoutRaf = 0; layoutCards(); });
   clearTimeout(snapTimer);
+  if (rulerDrag) return;   // the drag settles the deck itself when the finger lifts
   snapTimer = setTimeout(() => {
     const pos = queuePos();
     const i = Math.round(pos);
@@ -343,6 +345,35 @@ els.queueList.addEventListener("scroll", () => {
   }, 120);
 }, { passive: true });
 window.addEventListener("resize", () => layoutCards());
+
+// Drag the tuning scale left/right to move through the queue fast. The x position
+// maps onto the same track updateQueuePos() draws (22px inset each side).
+// A tap on the red needle still returns to the playing track (its own click handler).
+let rulerDrag = false;
+function scrubTo(clientX) {
+  const n = queueItems.length;
+  if (n < 2) return;
+  const r = els.queueScroll.getBoundingClientRect();
+  const trackW = Math.max(1, r.width - 44);
+  const pos = Math.min(n - 1, Math.max(0, ((clientX - r.left - 22) / trackW) * (n - 1)));
+  els.queueList.scrollTop = pos * STEP;
+}
+els.queueScroll.addEventListener("pointerdown", (e) => {
+  if (e.target === els.queuePlaying || e.button > 0) return;
+  rulerDrag = true;
+  els.queueScroll.classList.add("dragging");
+  try { els.queueScroll.setPointerCapture(e.pointerId); } catch {}   // capture is a nicety; the scrub works without it
+  scrubTo(e.clientX);
+});
+els.queueScroll.addEventListener("pointermove", (e) => { if (rulerDrag) scrubTo(e.clientX); });
+function endRulerDrag() {
+  if (!rulerDrag) return;
+  rulerDrag = false;
+  els.queueScroll.classList.remove("dragging");
+  scrollQueueTo(Math.round(queuePos()));
+}
+els.queueScroll.addEventListener("pointerup", endRulerDrag);
+els.queueScroll.addEventListener("pointercancel", endRulerDrag);
 
 // --- Download progress ---
 function renderDownload(dl) {
