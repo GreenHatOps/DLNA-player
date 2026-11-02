@@ -1419,8 +1419,7 @@ async def _run_playlist_batch(tracks: list[Track], play_first: bool, force: bool
             # A track inserted right after the current one ('next') was not
             # ready when the renderer got its gapless successor; give it now
             # or the renderer would skip it.
-            if _device_ready() and _is_next_up(track):
-                await _preload_next()
+            await _refresh_successor_if_ours(track)
 
             state.download.done = i + 1
             log.info("Downloaded [%d/%d]: %s", i + 1, len(tracks), track.title)
@@ -1447,6 +1446,31 @@ def _is_next_up(track: Track) -> bool:
         return False
     nxt = _get_next_index()
     return nxt is not None and state.queue[nxt].id == track.id
+
+
+async def _refresh_successor_if_ours(track: Track):
+    """Hand a just-downloaded 'next' track to the renderer as its gapless
+    successor, but only while bulb_voice still owns playback. If Home
+    Assistant or Volumio took the renderer during the download, programming
+    a successor would play our track after theirs and bypass auto-advance's
+    ownership guard. Rechecked after the await: the device or the queue may
+    have changed meanwhile. A failed read sends nothing."""
+    if not (_device_ready() and _is_next_up(track)) or _playing_foreign:
+        return
+    dev = device
+    try:
+        uri = (await dlna_get_position()).get("track_uri", "")
+    except Exception as e:
+        log.debug("Not preloading %s: TrackURI read failed: %s", track.title, e)
+        return
+    if device is not dev or not _device_ready() or not _is_next_up(track):
+        return  # switched speaker or queue changed during the read
+    cur = state.queue[state.current_index]
+    playing_id = _track_id_from_stream_uri(uri)
+    if _is_foreign_uri(uri) or (playing_id is not None and playing_id != cur.id):
+        log.info("Not preloading %s: the renderer is playing something else", track.title)
+        return
+    await _preload_next()
 
 
 def _drop_track_at(idx: int) -> Track:

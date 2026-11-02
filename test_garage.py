@@ -675,27 +675,83 @@ class TestNextRefreshesGaplessSuccessor(_QueueBase):
                                              source_url=f"https://www.youtube.com/watch?v={t * 11}",
                                              local_path=f"/{t}.mp3"))
         app.state.current_index = 0
+        app._playing_foreign = False
 
     def teardown_method(self):
         app.CACHE_DIR = self.orig_cache
+        app._playing_foreign = False
         super().teardown_method()
 
-    @pytest.mark.asyncio
-    async def test_inserted_next_track_becomes_the_gapless_successor(self):
+    OURS_A = f"{app.BASE_URL}/stream/A"
+
+    async def enqueue_next_and_download(self, position):
+        """Preload B, insert X with 'next', run the real batch. `position` is what
+        the renderer reports while X lands (dict, exception, or side_effect fn).
+        Returns the dlna_set_next_uri mock."""
         async def dl(url, tid):
             return {"local_path": f"/{tid}.mp3", "content_type": "audio/mpeg", "content_length": 1,
                     "title": "X", "artist": "", "duration": 200}
+        pos = AsyncMock(return_value=position) if isinstance(position, dict) else AsyncMock(side_effect=position)
         with patch.object(app, "_device_ready", return_value=True), \
              patch.object(app, "dlna_set_next_uri", new_callable=AsyncMock) as set_next, \
+             patch.object(app, "dlna_get_position", pos), \
              patch.object(app, "_ytm_resolve", new_callable=AsyncMock, return_value=_tracks("xxxxxxxxxxx")), \
              patch.object(app, "download_youtube", side_effect=dl), \
              patch("asyncio.create_task") as ct:
             await app._preload_next()
             assert set_next.call_args.args[0].id == "B"          # renderer has B queued
+            set_next.reset_mock()
             await app.ytm_enqueue(app.YtmEnqueueRequest(kind="song", id="x", mode="next"))
             assert [t.title for t in app.state.queue] == ["A", "Txxxxxxxxxxx", "B"]
             await ct.call_args.args[0]                            # run the download batch
+        return set_next
+
+    @pytest.mark.asyncio
+    async def test_inserted_next_track_becomes_the_gapless_successor(self):
+        set_next = await self.enqueue_next_and_download({"track_uri": self.OURS_A})
         assert set_next.call_args.args[0].title == "X"          # renderer now plays X after A
+
+    @pytest.mark.asyncio
+    async def test_renderer_without_trackuri_still_gets_the_successor(self):
+        set_next = await self.enqueue_next_and_download({"track_uri": ""})
+        assert set_next.call_args.args[0].title == "X"
+
+    @pytest.mark.asyncio
+    async def test_no_successor_once_a_foreign_owner_was_detected(self):
+        """Reviewer's probe: HA announcement seen by a PLAYING poll, then X lands."""
+        foreign = {"track_uri": "http://ha.local/tts/announce.mp3", "position": 3, "duration": 9}
+        with patch.object(app, "dlna_get_position", new_callable=AsyncMock, return_value=foreign):
+            await app._note_playback_owner()
+        assert app._playing_foreign is True
+        set_next = await self.enqueue_next_and_download(foreign)
+        set_next.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_successor_when_taken_over_during_the_download(self, caplog):
+        """Last poll still saw our A, but the renderer is someone else's by now."""
+        with caplog.at_level("INFO", logger="bulb_voice"):
+            set_next = await self.enqueue_next_and_download({"track_uri": "http://127.0.0.1/USB/x.mp3"})
+        set_next.assert_not_called()
+        assert "Not preloading X: the renderer is playing something else" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_no_successor_when_renderer_plays_another_of_our_tracks(self):
+        set_next = await self.enqueue_next_and_download({"track_uri": f"{app.BASE_URL}/stream/B"})
+        set_next.assert_not_called()                             # gapless sync owns this case
+
+    @pytest.mark.asyncio
+    async def test_no_successor_when_the_ownership_read_fails(self):
+        set_next = await self.enqueue_next_and_download(OSError("timeout"))
+        set_next.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_successor_after_a_device_switch_during_the_read(self):
+        def switch(*a, **k):
+            app.device = MagicMock(friendly_name="Bose_out")  # user picked another speaker
+            return {"track_uri": self.OURS_A}
+        with patch.object(app, "device", MagicMock(friendly_name="Volumio-UPnP/AV")):
+            set_next = await self.enqueue_next_and_download(switch)
+        set_next.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_end_mode_does_not_touch_the_successor(self):
