@@ -12,7 +12,7 @@
   <link rel="preload" href="/static/fonts/barlow-condensed-600-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/barlow-400-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/fonts/fonts.css?v=1">
-  <link rel="stylesheet" href="/static/style.css?v=17">
+  <link rel="stylesheet" href="/static/style.css?v=20">
 </head>
 <body>
   <!-- gstack-lint-disable hero-balance: Bulb Voice is a speaker remote, not a landing page; the display window and transport keys are the first screen -->
@@ -57,34 +57,50 @@
       </div>
     </section>
 
-    <section class="controls" aria-label="Playback">
-      <div class="transport">
-        <button id="btn-prev" class="key ctrl-btn" type="button">
-          <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>Prev
-        </button>
-        <button id="btn-play" class="key ctrl-btn play-btn" type="button" aria-label="Play">
-          <svg id="icon-play" aria-hidden="true" viewBox="0 0 24 24" width="26" height="26"><path d="M8 5v14l11-7z"/></svg>
-          <svg id="icon-pause" aria-hidden="true" viewBox="0 0 24 24" width="26" height="26" style="display:none"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
-          <span id="play-label">Play</span>
-        </button>
-        <button id="btn-next" class="key ctrl-btn" type="button">
-          <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>Next
-        </button>
+    <section class="queue-section">
+      <h2 class="sr-only">Queue <span id="queue-count"></span></h2>
+      <p id="queue-help" class="queue-help">Scroll to browse · Tap a card to play</p>
+      <div id="queue-list" tabindex="0" role="region" aria-label="Track queue" aria-describedby="queue-help">
+        <div id="queue-stage"></div>
+        <div id="queue-spacer"></div>
       </div>
-      <div class="modes">
-        <button id="btn-stop" class="key" type="button">Stop</button>
-        <button id="btn-repeat" class="key on" type="button" aria-pressed="false"><span id="repeat-label">Repeat</span></button>
-        <button id="btn-shuffle" class="key on" type="button" aria-pressed="false">Shuffle</button>
+      <div id="queue-scroll" class="hidden">
+        <span id="queue-pos" aria-live="off"></span>
+        <div id="queue-scroll-thumb"></div>
+        <button id="queue-playing" class="hidden" type="button" aria-label="Return to current track" title="Return to current track"></button>
       </div>
     </section>
 
-    <section class="volume-section" aria-label="Volume">
-      <span class="legend" aria-hidden="true">Vol</span>
-      <button id="vol-down" class="key" type="button" aria-label="Volume down">−</button>
-      <div class="fader-slot"><input type="range" id="volume-slider" min="0" max="100" value="30" aria-label="Volume"></div>
-      <button id="vol-up" class="key" type="button" aria-label="Volume up">+</button>
-      <span id="volume-val" aria-hidden="true">30</span>
-    </section>
+    <!-- Thumb zone: pinned to the bottom of the screen on phones, left column on desktop -->
+    <div class="thumb">
+      <section class="controls" aria-label="Playback">
+        <div class="transport">
+          <button id="btn-prev" class="key ctrl-btn" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>Prev
+          </button>
+          <button id="btn-play" class="key ctrl-btn play-btn" type="button" aria-label="Play">
+            <svg id="icon-play" aria-hidden="true" viewBox="0 0 24 24" width="26" height="26"><path d="M8 5v14l11-7z"/></svg>
+            <svg id="icon-pause" aria-hidden="true" viewBox="0 0 24 24" width="26" height="26" style="display:none"><path d="M6 19h4V5H6zm8-14v14h4V5z"/></svg>
+            <span id="play-label">Play</span>
+          </button>
+          <button id="btn-next" class="key ctrl-btn" type="button">
+            <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>Next
+          </button>
+        </div>
+        <div class="modes">
+          <button id="btn-stop" class="key" type="button">Stop</button>
+          <button id="btn-repeat" class="key on" type="button" aria-pressed="false"><span id="repeat-label">Repeat</span></button>
+          <button id="btn-shuffle" class="key on" type="button" aria-pressed="false">Shuffle</button>
+        </div>
+      </section>
+      <section class="volume-section" aria-label="Volume">
+        <span class="legend" aria-hidden="true">Vol</span>
+        <button id="vol-down" class="key" type="button" aria-label="Volume down">−</button>
+        <div class="fader-slot"><input type="range" id="volume-slider" min="0" max="100" value="30" aria-label="Volume"></div>
+        <button id="vol-up" class="key" type="button" aria-label="Volume up">+</button>
+        <span id="volume-val" aria-hidden="true">30</span>
+      </section>
+    </div>
 
     <section class="add-section">
       <form id="add-form">
@@ -112,19 +128,6 @@
       <ul id="result-list"></ul>
     </section>
 
-    <section class="queue-section">
-      <h2>Queue <span id="queue-count"></span><span id="queue-pos"></span></h2>
-      <p id="queue-help" class="queue-help">Scroll to browse · Tap a card to play</p>
-      <div id="queue-list" tabindex="0" role="region" aria-label="Track queue" aria-describedby="queue-help">
-        <div id="queue-stage"></div>
-        <div id="queue-spacer"></div>
-      </div>
-      <div id="queue-scroll" class="hidden">
-        <div id="queue-scroll-thumb"></div>
-        <button id="queue-playing" class="hidden" type="button" aria-label="Return to current track" title="Return to current track"></button>
-      </div>
-    </section>
-
     <section class="log-section">
       <button id="btn-toggle-logs" class="log-toggle" type="button" aria-expanded="false">Logs</button>
       <div id="log-panel" class="log-panel hidden">
@@ -134,6 +137,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js?v=17"></script>
+  <script src="/static/app.js?v=20"></script>
 </body>
 </html>

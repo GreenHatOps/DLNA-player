@@ -41,6 +41,8 @@
   --r-key: 12px;         /* rounded keys; set both to 999px for pills */
   --r-key-lg: 16px;
 
+  --deck-h: 360px;        /* Rolodex height: app.js fits it between the display and the thumb zone */
+
   --cond: "Barlow Condensed", "Arial Narrow", sans-serif;
   --body: "Barlow", "Helvetica Neue", sans-serif;
   --dot: "Doto", "Barlow Condensed", monospace;
@@ -170,6 +172,7 @@ header h1 {
 
 .track-info .title {
   font: 600 32px/34px var(--cond);
+  min-height: 68px;            /* always two lines tall: the queue never jumps between tracks */
   letter-spacing: -.005em;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -181,6 +184,7 @@ header h1 {
 
 .track-info .artist {
   font: 500 16px/24px var(--body);
+  min-height: 24px;            /* reserved before the first status arrives */
   color: var(--lcd-ink-muted);
   margin-top: 4px;
   white-space: nowrap;
@@ -188,13 +192,13 @@ header h1 {
   text-overflow: ellipsis;
 }
 
-/* Readouts on top, a printed scale with the red needle below */
+/* Readouts either side of a printed scale with the red needle */
 .progress-wrap {
   display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-areas: "cur dur" "bar bar";
-  align-items: baseline;
-  row-gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "cur bar dur";
+  align-items: center;
+  column-gap: 8px;
   margin-top: 16px;
   font: 700 22px/1 var(--dot);
   font-variant-numeric: tabular-nums;
@@ -379,18 +383,17 @@ header h1 {
 .add-section input::placeholder { color: var(--muted); }
 
 /* Queue */
-.queue-section h2 {
-  font: 600 16px/1.2 var(--cond);
-  color: var(--muted);
-  margin-bottom: 8px;
-}
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
-.queue-section h2 { display: flex; align-items: baseline; gap: 8px; }
-#queue-count { font-weight: 500; }
+/* "55 / 239" sits on the ruler row, above the ticks (which run at 14-30px) */
 #queue-pos {
-  margin-left: auto;
-  font: 500 14px/1 var(--body);
+  position: absolute;
+  top: 0;
+  right: 22px;
+  font: 500 13px/1 var(--body);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
 /* The ruler is a tuning scale: printed ticks, a neutral window for the browsing
@@ -457,7 +460,7 @@ header h1 {
    #queue-stage sticks to its top and holds the cards in 3D. */
 #queue-list {
   position: relative;
-  height: 360px;
+  height: var(--deck-h);
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -471,7 +474,7 @@ header h1 {
 #queue-stage {
   position: sticky;
   top: 0;
-  height: 360px;
+  height: var(--deck-h);
   perspective: 900px;
   perspective-origin: 50% 50%;
 }
@@ -505,7 +508,8 @@ header h1 {
 .queue-item:not(.focus) .q-remove,
 .queue-item:not(.focus) .q-play { display: none; }
 
-.queue-help { color: var(--muted); font-size: 14px; margin: 8px 0; }
+/* The hint stays for screen readers (aria-describedby) */
+.queue-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .queue-item .q-play {
   position: absolute;
   right: 8px;
@@ -880,6 +884,42 @@ header h1 {
   flex-direction: column;
   gap: 16px;
   flex: 1;
+}
+
+/* Thumb zone: transport, Stop / Repeat / Shuffle and volume. */
+.thumb { display: grid; gap: 8px; }
+
+/* Phones and tablets: the thumb zone is pinned to the bottom of the screen and the
+   Rolodex sits between it and the display; it flows back into place when you scroll
+   down to search and logs. */
+@media (max-width: 1023px) {
+  .thumb {
+    position: sticky;
+    bottom: 0;
+    z-index: 200;               /* above the Rolodex cards */
+    margin: 0 -16px;
+    padding: 8px 16px max(8px, env(safe-area-inset-bottom));
+    background: var(--chassis);
+    border-top: 1px solid var(--seam);
+    box-shadow: inset 0 1px 0 var(--edge);
+  }
+}
+
+/* Desktop: two columns. Display, controls, search and logs on the left; the queue
+   on the right, its deck fitted to the window height (at most 520px). */
+@media (min-width: 1024px) {
+  .app { max-width: 1080px; }
+  .app-main {
+    display: grid;
+    grid-template-columns: 480px minmax(0, 1fr);
+    grid-template-rows: repeat(5, auto) 1fr;   /* the queue's height goes to the last row, not between left items */
+    column-gap: 48px;
+    row-gap: 16px;
+    align-items: start;
+  }
+  .app-main > * { grid-column: 1; }
+  .app-main > .queue-section { grid-column: 2; grid-row: 1 / span 6; }
+  .log-section { margin-top: 0; }
 }
 
 .skip {

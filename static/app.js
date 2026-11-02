@@ -148,8 +148,14 @@ function setLamp(state, word) {
 // are in the DOM (the queue can hold hundreds). Later cards fan beneath
 // the focused card and bend away; earlier cards fan above and bend back.
 const CARD_H = 104;      // px, must match .queue-item height
-const WHEEL_CENTER = 180; // px, half the queue-stage height
-const WHEEL_RADIUS = 180;
+// Wheel geometry follows the deck height (--deck-h, fitted by fitDeck below).
+let WHEEL_CENTER = 180;  // px, half the queue-stage height
+let WHEEL_RADIUS = 180;
+function measureWheel() {
+  const h = els.queueStage.clientHeight || 360;
+  WHEEL_CENTER = h / 2;
+  WHEEL_RADIUS = h / 2;
+}
 const CARD_ANGLE = 28;   // degrees between cards around the cylinder
 const STEP = 56;         // px of scroll per card
 const NEAR = 4;
@@ -344,7 +350,33 @@ els.queueList.addEventListener("scroll", () => {
     if (Math.abs(pos - i) > 0.02) scrollQueueTo(i);
   }, 120);
 }, { passive: true });
-window.addEventListener("resize", () => layoutCards());
+// Fit the Rolodex between the display and the thumb zone so the queue and its ruler
+// are on the first screen. On phones the thumb zone is pinned to the bottom (sticky),
+// so its height comes off; on desktop it sits in the left column. Keys, gaps and
+// type keep their sizes: only the deck gives.
+const thumbZone = $(".thumb");
+const DECK_MIN = 140;                       // still shows the whole 104px front card
+function fitDeck() {
+  const pinned = getComputedStyle(thumbZone).position === "sticky";
+  const top = els.queueList.getBoundingClientRect().top + window.scrollY;
+  const ruler = 44 + 2;                     // #queue-scroll height + margin
+  let avail;
+  if (pinned) {
+    avail = window.innerHeight - top - ruler - 8 - thumbZone.offsetHeight;
+  } else {
+    // Desktop: end the queue column level with the search field so both columns finish together
+    avail = els.form.getBoundingClientRect().bottom + window.scrollY - top - ruler;
+  }
+  const h = Math.round(Math.min(pinned ? 420 : 520, Math.max(DECK_MIN, avail)));
+  document.documentElement.style.setProperty("--deck-h", `${h}px`);
+  measureWheel();
+  layoutCards();
+}
+fitDeck();
+document.fonts.ready.then(fitDeck);         // web fonts change the heights above the deck
+window.addEventListener("resize", fitDeck);
+// The speaker picker opens above the display and pushes the deck down: refit on toggle.
+new MutationObserver(fitDeck).observe(els.devicePicker, { attributes: true, attributeFilter: ["class"] });
 
 // Drag the tuning scale left/right to move through the queue fast. The x position
 // maps onto the same track updateQueuePos() draws (22px inset each side).
@@ -456,6 +488,8 @@ async function doSearch(query) {
       return;
     }
 
+    // Results sit below the queue: bring them into view once rendered (after the loop).
+    requestAnimationFrame(() => els.searchResults.scrollIntoView({ block: "start", behavior: reduceMotion.matches ? "auto" : "smooth" }));
     data.results.forEach((r) => {
       const li = document.createElement("li");
       li.className = "result-item";
