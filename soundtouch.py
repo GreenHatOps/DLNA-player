@@ -100,7 +100,7 @@ class SoundTouch:
                 if not await self.is_standby():
                     break
             except Exception:
-                pass
+                pass  # the speaker's API is flaky while it boots; keep polling until the deadline
         await asyncio.sleep(WAKE_SETTLE)
         return True
 

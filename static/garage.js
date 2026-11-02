@@ -114,7 +114,10 @@ function buildController() {
   svg("circle", { r: 22, fill: "transparent" }, pw);
   svg("path", { d: "M-7.1 -7.1 A10 10 0 1 0 7.1 -7.1", fill: "none", stroke: "#9aa0a6", "stroke-width": 2.6, "stroke-linecap": "round" }, pw);
   svg("line", { x1: 0, y1: -13, x2: 0, y2: -2, stroke: "#9aa0a6", "stroke-width": 2.6, "stroke-linecap": "round" }, pw);
-  pw.addEventListener("click", () => act(api("/api/garage/power", { method: "POST" }), "Music off").then(refresh));
+  pw.addEventListener("click", () => {
+    if (!S.garage || !S.garage.connected) return toast("Garage speaker is not connected", true);
+    act(api("/api/garage/power", { method: "POST" }), "Music off").then(refresh);
+  });
   C.l1 = svg("text", { class: "l1", x: 300, y: 292, "pointer-events": "none" }, s);
   C.l2 = svg("text", { class: "l2", x: 300, y: 322, "pointer-events": "none" }, s);
   C.l3 = svg("text", { class: "l3", x: 300, y: 362, "pointer-events": "none" }, s);

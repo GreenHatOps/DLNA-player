@@ -10,7 +10,8 @@ import pytest
 
 import app
 import soundtouch as st_mod
-from soundtouch import SoundTouch
+
+SoundTouch = st_mod.SoundTouch
 
 NOW_STANDBY = '<?xml version="1.0"?><nowPlaying deviceID="X" source="STANDBY"><ContentItem source="STANDBY"/></nowPlaying>'
 NOW_UPNP = ('<?xml version="1.0"?><nowPlaying deviceID="X" source="UPNP"><ContentItem source="UPNP"/>'
@@ -468,6 +469,71 @@ class TestYtmEnqueue(_QueueBase):
         assert ei.value.status_code == 502
 
 
+class TestNextRefreshesGaplessSuccessor(_QueueBase):
+    """A playing, B already handed to the renderer as its gapless successor;
+    'next' inserts X between them. Once X is downloaded the renderer must get
+    X as its successor, or it plays A -> B and skips X."""
+
+    def setup_method(self):
+        super().setup_method()
+        self.orig_cache = app.CACHE_DIR
+        app.CACHE_DIR = Path(self.tmpdir)
+        app.state.play_mode = "NORMAL"
+        for t in ("A", "B"):
+            app.state.queue.append(app.Track(id=t, title=t, artist="", source_type="youtube",
+                                             source_url=f"https://www.youtube.com/watch?v={t * 11}",
+                                             local_path=f"/{t}.mp3"))
+        app.state.current_index = 0
+
+    def teardown_method(self):
+        app.CACHE_DIR = self.orig_cache
+        super().teardown_method()
+
+    @pytest.mark.asyncio
+    async def test_inserted_next_track_becomes_the_gapless_successor(self):
+        async def dl(url, tid):
+            return {"local_path": f"/{tid}.mp3", "content_type": "audio/mpeg", "content_length": 1,
+                    "title": "X", "artist": "", "duration": 200}
+        with patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_set_next_uri", new_callable=AsyncMock) as set_next, \
+             patch.object(app, "_ytm_resolve", new_callable=AsyncMock, return_value=_tracks("xxxxxxxxxxx")), \
+             patch.object(app, "download_youtube", side_effect=dl), \
+             patch("asyncio.create_task") as ct:
+            await app._preload_next()
+            assert set_next.call_args.args[0].id == "B"          # renderer has B queued
+            await app.ytm_enqueue(app.YtmEnqueueRequest(kind="song", id="x", mode="next"))
+            assert [t.title for t in app.state.queue] == ["A", "Txxxxxxxxxxx", "B"]
+            await ct.call_args.args[0]                            # run the download batch
+        assert set_next.call_args.args[0].title == "X"          # renderer now plays X after A
+
+    @pytest.mark.asyncio
+    async def test_end_mode_does_not_touch_the_successor(self):
+        async def dl(url, tid):
+            return {"local_path": f"/{tid}.mp3", "content_type": "audio/mpeg", "content_length": 1,
+                    "title": "X", "artist": "", "duration": 200}
+        with patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_set_next_uri", new_callable=AsyncMock) as set_next, \
+             patch.object(app, "_ytm_resolve", new_callable=AsyncMock, return_value=_tracks("xxxxxxxxxxx")), \
+             patch.object(app, "download_youtube", side_effect=dl), \
+             patch("asyncio.create_task") as ct:
+            await app.ytm_enqueue(app.YtmEnqueueRequest(kind="song", id="x", mode="end"))
+            await ct.call_args.args[0]
+        set_next.assert_not_called()                             # B stays the successor
+
+    @pytest.mark.asyncio
+    async def test_going_past_a_downloading_track_is_logged(self, caplog):
+        app.state.queue.insert(1, app.Track(id="X", title="X", artist="", source_type="youtube",
+                                            source_url="u-x"))   # not downloaded yet
+        with patch.object(app, "dlna_get_position", new_callable=AsyncMock,
+                          return_value={"track_uri": f"{app.BASE_URL}/stream/B"}), \
+             patch.object(app, "_preload_next", new_callable=AsyncMock), \
+             patch.object(app, "_uri_change_ts", 0.0), \
+             caplog.at_level("INFO", logger="bulb_voice"):
+            await app._sync_index_with_device()
+        assert app.state.current_index == 2
+        assert "Renderer went past X (still downloading)" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Garage endpoints
 # ---------------------------------------------------------------------------
@@ -546,8 +612,30 @@ class TestGarage(_STBase):
     async def test_power_puts_soundtouch_in_standby(self):
         app.soundtouch = fake_st()
         app.soundtouch.standby = AsyncMock()
-        await app.garage_power()
+        with patch.object(app, "_garage_connected", return_value=True):
+            await app.garage_power()
         app.soundtouch.standby.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_power_never_stops_another_rooms_speaker(self):
+        """/garage left open in one tab, Volumio selected from another client."""
+        dev = MagicMock(friendly_name="Volumio-UPnP/AV")
+        with patch.object(app, "device", dev), \
+             patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_stop", new_callable=AsyncMock) as stop:
+            with pytest.raises(app.HTTPException) as ei:
+                await app.garage_power()
+        assert ei.value.status_code == 409
+        stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_power_on_garage_without_soundtouch_side_channel_stops_it(self):
+        dev = MagicMock(friendly_name="Bose_out")
+        with patch.object(app, "device", dev), \
+             patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_stop", new_callable=AsyncMock) as stop:
+            await app.garage_power()
+        stop.assert_awaited_once()
 
 
 class TestGarageSwitch:
