@@ -251,10 +251,10 @@ header h1 {
   gap: 8px;
 }
 
-.transport {
+.transport {                   /* one row: Stop, Prev, Play, Next, Repeat, Shuffle */
   display: grid;
-  grid-template-columns: 1fr 1.3fr 1fr;
-  gap: 8px;
+  grid-template-columns: 1fr 1fr 1.3fr 1fr 1fr 1fr;
+  gap: 4px;
   align-items: end;
 }
 .transport .key {

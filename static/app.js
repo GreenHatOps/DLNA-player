@@ -643,7 +643,10 @@ function updateModeIcon(mode) {
   currentMode = mode;
   const repeat = mode === "REPEAT_ALL" || mode === "REPEAT_ONE";
   $("#btn-repeat").setAttribute("aria-pressed", String(repeat));
-  $("#repeat-label").textContent = { REPEAT_ALL: "Repeat all", REPEAT_ONE: "Repeat one" }[mode] || "Repeat";
+  // One row of keys leaves no room for "Repeat one": the icon shows the mode (a "1" for one)
+  $("#icon-repeat").style.display = mode === "REPEAT_ONE" ? "none" : "block";
+  $("#icon-repeat-one").style.display = mode === "REPEAT_ONE" ? "block" : "none";
+  $("#btn-repeat").setAttribute("aria-label", "Repeat: " + ({ REPEAT_ALL: "all", REPEAT_ONE: "one" }[mode] || "off"));
   $("#btn-shuffle").setAttribute("aria-pressed", String(mode === "SHUFFLE"));
 }
 
