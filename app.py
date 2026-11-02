@@ -1107,11 +1107,17 @@ async def dlna_set_raw_uri(url: str, title: str, content_type: str):
         InstanceID=0, CurrentURI=url, CurrentURIMetaData=didl)
 
 
+def _garage_connected(cfg: dict | None = None) -> bool:
+    """bulb_voice is driving the garage speaker right now."""
+    cfg = cfg or _garage_cfg()
+    return device is not None and device.friendly_name == cfg.get("device") and _device_ready()
+
+
 @app.get("/api/garage/state")
 async def garage_state():
     cfg = _garage_cfg()
     presets = cfg.get("presets", [])
-    connected = device is not None and device.friendly_name == cfg.get("device") and _device_ready()
+    connected = _garage_connected(cfg)
     out = {"device": cfg.get("device"), "connected": connected,
            "active_device": device.friendly_name if device else None,
            "presets": [p["name"] for p in presets], "stations": _dial_stations(presets),
@@ -1168,11 +1174,15 @@ async def garage_preset(n: int):
 
 @app.post("/api/garage/power")
 async def garage_power():
-    """Music off: SoundTouch to standby (a plain DLNA stop otherwise)."""
+    """Music off: SoundTouch to standby (a plain DLNA stop otherwise). Only
+    when the garage speaker is the active device: a /garage page left open
+    while another room's speaker is selected must not stop that speaker."""
+    if not _garage_connected():
+        raise HTTPException(status_code=409, detail="Garage speaker is not connected")
     _mark_user_stop()
     if soundtouch:
         await soundtouch.standby()
-    elif _device_ready():
+    else:
         await dlna_stop()
     return {"ok": True}
 
@@ -1406,6 +1416,12 @@ async def _run_playlist_batch(tracks: list[Track], play_first: bool, force: bool
                 except Exception as e:
                     log.warning("Auto-play first playlist track failed: %s", e)
 
+            # A track inserted right after the current one ('next') was not
+            # ready when the renderer got its gapless successor; give it now
+            # or the renderer would skip it.
+            if _device_ready() and _is_next_up(track):
+                await _preload_next()
+
             state.download.done = i + 1
             log.info("Downloaded [%d/%d]: %s", i + 1, len(tracks), track.title)
             _save_state()
@@ -1422,6 +1438,15 @@ async def _run_playlist_batch(tracks: list[Track], play_first: bool, force: bool
                 p.unlink(missing_ok=True)
             _save_state()
     state.download = DownloadProgress()  # clear when done
+
+
+def _is_next_up(track: Track) -> bool:
+    """True if `track` plays right after the current one (NORMAL/REPEAT_ALL;
+    shuffle and repeat-one have no fixed successor to refresh)."""
+    if state.play_mode not in ("NORMAL", "REPEAT_ALL") or state.current_index < 0:
+        return False
+    nxt = _get_next_index()
+    return nxt is not None and state.queue[nxt].id == track.id
 
 
 def _drop_track_at(idx: int) -> Track:
@@ -1704,6 +1729,13 @@ async def _sync_index_with_device():
     idx = next((i for i, t in enumerate(state.queue) if t.id == track_id), None)
     if idx is None or idx == state.current_index:
         return
+    # The renderer's preloaded successor can be older than a track inserted
+    # with 'next' that is still downloading; say so instead of skipping silently.
+    skipped = [t.title for t in state.queue[state.current_index + 1:idx]
+               if not t.local_path and t.source_type == "youtube"] \
+        if 0 <= state.current_index < idx else []
+    if skipped:
+        log.info("Renderer went past %s (still downloading)", ", ".join(skipped))
     state.current_index = idx
     log.info("Device advanced via gapless to track %d (%s)", idx, state.queue[idx].title)
     await _preload_next()
