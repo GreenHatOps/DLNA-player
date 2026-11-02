@@ -1025,14 +1025,20 @@ async def ytm_enqueue(req: YtmEnqueueRequest):
     if play_first:
         state.current_index = pos
     if mode == "now" and not was_empty and _device_ready():
-        # Stop what's playing so the first new track starts when it lands;
-        # mark it as a user stop so auto-advance doesn't jump ahead meanwhile.
+        # Stop the old track now (marked as a user stop, so auto-advance
+        # ignores it). Keep this even though `force` starts the new track:
+        # an old track left playing could end or gapless-advance during the
+        # download, move current_index off the new track, and make the
+        # force check skip it ("queue moved").
         _mark_user_stop()
         try:
             await dlna_stop()
         except Exception as e:
             log.debug("Stop before play-now failed: %s", e)
-    asyncio.create_task(_download_playlist_tracks(tracks, play_first=play_first))
+    # 'now' takes the renderer even if something else is playing by the time
+    # the download lands (Volumio restarts its own queue after a UPnP Stop).
+    asyncio.create_task(_download_playlist_tracks(tracks, play_first=play_first,
+                                                  force=mode == "now"))
     log.info("YouTube Music: queued %d track(s) [%s %s] mode=%s", len(tracks), req.kind, req.id, mode)
     return {"ok": True, "count": len(tracks), "skipped": skipped,
             "tracks": [_track_dict(t) for t in tracks[:10]]}
@@ -1343,15 +1349,40 @@ async def queue_add(req: AddRequest):
 _batch_download_lock = asyncio.Lock()
 
 
-async def _download_playlist_tracks(tracks: list[Track], play_first: bool = False):
+async def _download_playlist_tracks(tracks: list[Track], play_first: bool = False,
+                                    force: bool = False):
     """Download playlist tracks sequentially in the background.  Batches are
     serialized via a lock so concurrent playlist adds don't compete for
     bandwidth or clobber each other's progress card."""
     async with _batch_download_lock:
-        await _run_playlist_batch(tracks, play_first)
+        await _run_playlist_batch(tracks, play_first, force)
 
 
-async def _run_playlist_batch(tracks: list[Track], play_first: bool):
+async def _start_first_download(track: Track, batch_ids: set[str], force: bool):
+    """Start playback when a batch's first track has downloaded. Normally only
+    on an idle renderer; force ('play now') takes it over whatever it plays,
+    as long as the queue still points at this batch (the user may have picked
+    something else during the download). Every skip is logged."""
+    if force:
+        cur = (state.queue[state.current_index]
+               if 0 <= state.current_index < len(state.queue) else None)
+        if cur is None or cur.id not in batch_ids or not cur.local_path:
+            log.info("Not starting %s: the queue moved to another track during the download",
+                     track.title)
+            return
+        await _play_current()
+        return
+    ts = await dlna_get_transport_state()
+    if ts not in ("STOPPED", "NO_MEDIA_PRESENT"):
+        log.info("Not auto-starting %s: renderer is %s", track.title, ts)
+        return
+    idx = next((j for j, t in enumerate(state.queue) if t.id == track.id), None)
+    if idx is not None:
+        state.current_index = idx
+        await _play_current()
+
+
+async def _run_playlist_batch(tracks: list[Track], play_first: bool, force: bool = False):
     # Tracks may have been removed from the queue while waiting for the lock
     queued_ids = {t.id for t in state.queue}
     tracks = [t for t in tracks if t.id in queued_ids]
@@ -1377,24 +1408,18 @@ async def _run_playlist_batch(tracks: list[Track], play_first: bool):
             track.duration = info["duration"]
 
             # Start playback on the first track that actually downloads
-            # (earlier ones may have failed), unless something is already playing.
+            # (earlier ones may have failed and been dropped).
             if not started and _device_ready():
                 started = True
                 try:
-                    ts = await dlna_get_transport_state()
-                    if ts in ("STOPPED", "NO_MEDIA_PRESENT"):
-                        idx = next((j for j, t in enumerate(state.queue) if t.id == track.id), None)
-                        if idx is not None:
-                            state.current_index = idx
-                            await _play_current()
+                    await _start_first_download(track, {t.id for t in tracks}, force)
                 except Exception as e:
                     log.warning("Auto-play first playlist track failed: %s", e)
 
             # A track inserted right after the current one ('next') was not
             # ready when the renderer got its gapless successor; give it now
             # or the renderer would skip it.
-            if _device_ready() and _is_next_up(track):
-                await _preload_next()
+            await _refresh_successor_if_ours(track)
 
             state.download.done = i + 1
             log.info("Downloaded [%d/%d]: %s", i + 1, len(tracks), track.title)
@@ -1421,6 +1446,31 @@ def _is_next_up(track: Track) -> bool:
         return False
     nxt = _get_next_index()
     return nxt is not None and state.queue[nxt].id == track.id
+
+
+async def _refresh_successor_if_ours(track: Track):
+    """Hand a just-downloaded 'next' track to the renderer as its gapless
+    successor, but only while bulb_voice still owns playback. If Home
+    Assistant or Volumio took the renderer during the download, programming
+    a successor would play our track after theirs and bypass auto-advance's
+    ownership guard. Rechecked after the await: the device or the queue may
+    have changed meanwhile. A failed read sends nothing."""
+    if not (_device_ready() and _is_next_up(track)) or _playing_foreign:
+        return
+    dev = device
+    try:
+        uri = (await dlna_get_position()).get("track_uri", "")
+    except Exception as e:
+        log.debug("Not preloading %s: TrackURI read failed: %s", track.title, e)
+        return
+    if device is not dev or not _device_ready() or not _is_next_up(track):
+        return  # switched speaker or queue changed during the read
+    cur = state.queue[state.current_index]
+    playing_id = _track_id_from_stream_uri(uri)
+    if _is_foreign_uri(uri) or (playing_id is not None and playing_id != cur.id):
+        log.info("Not preloading %s: the renderer is playing something else", track.title)
+        return
+    await _preload_next()
 
 
 def _drop_track_at(idx: int) -> Track:
@@ -1529,6 +1579,7 @@ async def api_seek(req: SeekRequest):
     if not _device_ready():
         raise HTTPException(status_code=503, detail="Device not connected")
     await dlna_seek(max(0, req.position))
+    _note_seek(max(0, req.position))
     return {"ok": True}
 
 
@@ -1617,6 +1668,11 @@ _uri_change_ts = 0.0  # time.monotonic() of last SetAVTransportURI we issued
 USER_STOP_WINDOW = 10.0  # suppress auto-advance this long after a user stop
 URI_SYNC_GRACE = 5.0  # skip gapless index sync this long after we set a URI
 _playing_foreign = False  # renderer's last PLAYING URI was not one of ours
+# Renderer position/duration (s) at the last PLAYING poll; 0 = unknown.
+_last_position = 0
+_last_duration = 0
+_last_position_at = 0.0  # time.monotonic() of that poll
+END_OF_TRACK_SLACK = 15  # a stop this close to the end is the track ending
 
 
 def _is_foreign_uri(uri: str) -> bool:
@@ -1627,11 +1683,43 @@ def _is_foreign_uri(uri: str) -> bool:
 
 
 async def _note_playback_owner():
-    global _playing_foreign
+    """On a PLAYING poll, record who owns the renderer and how far into the
+    track it is; auto-advance uses both when the renderer stops."""
+    global _playing_foreign, _last_position, _last_duration, _last_position_at
     try:
-        _playing_foreign = _is_foreign_uri((await dlna_get_position()).get("track_uri", ""))
+        info = await dlna_get_position()
     except Exception as e:
         log.debug("TrackURI read failed: %s", e)
+        _last_position = _last_duration = 0  # unknown: never block an advance on stale data
+        return
+    _playing_foreign = _is_foreign_uri(info.get("track_uri", ""))
+    _last_position = info.get("position", 0)
+    _last_duration = info.get("duration", 0)
+    _last_position_at = time.monotonic()
+
+
+def _note_seek(position: int):
+    """A seek near the end can finish the track before the next poll; without
+    this the stop would be judged against the pre-seek position."""
+    global _last_position, _last_position_at
+    if _last_position > 0:  # only where the renderer reports positions
+        _last_position, _last_position_at = position, time.monotonic()
+
+
+def _stopped_mid_track() -> bool:
+    """True if the renderer stopped well before the end of our track: another
+    controller replaced it (Volumio UI/app, HA) or someone pressed stop on the
+    device. Not the track ending, so auto-advance must not take the renderer
+    back. The renderer's duration and our own (from yt-dlp) must both put the
+    stop before the end: a renderer that misjudges a VBR MP3's length still
+    advances. Unknown position or duration counts as the end (old behaviour)."""
+    if _last_position <= 0:
+        return False
+    played = _last_position + (time.monotonic() - _last_position_at)
+    ours = (state.queue[state.current_index].duration or 0
+            if 0 <= state.current_index < len(state.queue) else 0)
+    known = [d for d in (_last_duration, ours) if d > 0]
+    return bool(known) and all(d - played > END_OF_TRACK_SLACK for d in known)
 
 
 def _mark_user_stop():
@@ -1714,6 +1802,14 @@ async def auto_advance_loop():
                         log.info("SoundTouch went to standby; treating as a user stop")
                         _last_transport_state = ts
                         continue
+                # Our track stopped well before its end: another controller
+                # (Volumio UI/app, HA) took the renderer, or someone stopped
+                # it on the device. Advancing would play over what they started.
+                if _stopped_mid_track():
+                    log.info("Renderer stopped mid-track (last seen at %ds); not advancing",
+                             _last_position)
+                    _last_transport_state = ts
+                    continue
                 next_idx = _get_next_index()
                 if next_idx is not None:
                     state.current_index = next_idx
@@ -1793,6 +1889,7 @@ async def _play_current():
     if not _device_ready():
         raise HTTPException(status_code=503, detail="Device not connected")
     track = state.queue[state.current_index]
+    log.info("Playing track %d: %s", state.current_index, track.title)
     if soundtouch:
         # Wake from standby, unmute, set its own volume — or the stream is silent.
         try:

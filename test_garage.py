@@ -222,6 +222,7 @@ class _AdvanceBase(_STBase):
         super().setup_method()
         app._last_transport_state = "PLAYING"
         app._user_stop_ts = 0.0
+        self._reset_position()
         app.state.queue.clear()
         for i in "ab":
             app.state.queue.append(app.Track(id=i, title=i, artist="", source_type="youtube",
@@ -231,8 +232,20 @@ class _AdvanceBase(_STBase):
     def teardown_method(self):
         super().teardown_method()
         app._last_transport_state = "STOPPED"
+        self._reset_position()
         app.state.queue.clear()
         app.state.current_index = -1
+
+    @staticmethod
+    def _reset_position():
+        app._last_position = app._last_duration = 0
+        app._last_position_at = 0.0
+
+    @staticmethod
+    def seen(position, duration, ago=0.0):
+        """The last PLAYING poll saw the renderer at position/duration, `ago` s ago."""
+        app._last_position, app._last_duration = position, duration
+        app._last_position_at = time.monotonic() - ago
 
     async def run_once(self, transport="STOPPED"):
         calls = {"n": 0}
@@ -276,6 +289,107 @@ class TestAutoAdvanceGuards(_AdvanceBase):
     async def test_soundtouch_awake_still_advances(self):
         app.soundtouch = fake_st(standby=False)
         play = await self.run_once()
+        play.assert_awaited_once()
+
+
+class TestMidTrackStop(_AdvanceBase):
+    """Volumio's UI/app (or HA) replaced our track: the renderer reports a
+    STOPPED gap mid-track. Advancing there would take the renderer back."""
+
+    @pytest.mark.asyncio
+    async def test_no_advance_when_stopped_mid_track(self, caplog):
+        self.seen(100, 300)
+        with caplog.at_level("INFO", logger="bulb_voice"):
+            play = await self.run_once()
+        play.assert_not_called()
+        assert app.state.current_index == 0
+        assert "stopped mid-track" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_natural_end_still_advances(self):
+        self.seen(290, 300)   # last poll ~3 s before the end, plus renderer lag
+        play = await self.run_once()
+        play.assert_awaited_once()
+        assert app.state.current_index == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_position_still_advances(self):
+        """Renderers that report RelTime 0 / NOT_IMPLEMENTED: old behaviour."""
+        self.seen(0, 300)
+        (await self.run_once()).assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_durations_still_advance(self):
+        self.seen(100, 0)     # renderer and queue both without a duration
+        (await self.run_once()).assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_our_duration_covers_renderer_overestimate(self):
+        """A renderer that misjudges a VBR MP3's length must not stall the queue."""
+        app.state.queue[0].duration = 300
+        self.seen(292, 600)
+        (await self.run_once()).assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_our_duration_alone_detects_mid_track(self):
+        app.state.queue[0].duration = 300
+        self.seen(100, 0)
+        (await self.run_once()).assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_poll_is_extrapolated(self):
+        """Polls stopped for a while (device unreachable): the track has played
+        on meanwhile, so the stop is its end, not a takeover."""
+        self.seen(100, 300, ago=250)
+        (await self.run_once()).assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_seek_to_the_end_then_stop_advances(self):
+        """Seek into the last seconds; the track ends before the next poll."""
+        self.seen(100, 300)
+        with patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_seek", new_callable=AsyncMock):
+            await app.api_seek(app.SeekRequest(position=295))
+        (await self.run_once()).assert_awaited_once()
+
+    async def run_two_ticks(self, position_info):
+        """A real PLAYING poll followed by a STOPPED poll."""
+        calls = {"n": 0}
+
+        async def two_ticks(_):
+            calls["n"] += 1
+            if calls["n"] > 2:
+                raise RuntimeError("stop loop")
+        pos = AsyncMock(side_effect=position_info) if isinstance(position_info, Exception) \
+            else AsyncMock(return_value=position_info)
+        with patch.object(app.asyncio, "sleep", side_effect=two_ticks), \
+             patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_get_transport_state", new_callable=AsyncMock,
+                          side_effect=["PLAYING", "STOPPED"]), \
+             patch.object(app, "dlna_get_position", pos), \
+             patch.object(app, "_play_current", new_callable=AsyncMock) as play:
+            with pytest.raises(RuntimeError):
+                await app.auto_advance_loop()
+        return play
+
+    @pytest.mark.asyncio
+    async def test_takeover_seen_by_polls(self):
+        """10:55:04 on 2026-11-02: 73 min into a 125 min track, then STOPPED."""
+        play = await self.run_two_ticks({"position": 4400, "duration": 7501,
+                                         "track_uri": f"{app.BASE_URL}/stream/a"})
+        play.assert_not_called()
+        assert app.state.current_index == 0
+
+    @pytest.mark.asyncio
+    async def test_end_seen_by_polls_advances(self):
+        play = await self.run_two_ticks({"position": 7499, "duration": 7501,
+                                         "track_uri": f"{app.BASE_URL}/stream/a"})
+        play.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_position_read_falls_back_to_advancing(self):
+        self.seen(100, 300)   # stale mid-track data from an earlier poll
+        play = await self.run_two_ticks(OSError("timeout"))
         play.assert_awaited_once()
 
 
@@ -443,6 +557,7 @@ class TestYtmEnqueue(_QueueBase):
         assert app.state.queue[1].title == "Taaaaaaaaaaa"
         stop.assert_awaited_once()
         assert dl.call_args.kwargs["play_first"] is True
+        assert dl.call_args.kwargs["force"] is True       # take the renderer when it lands
         assert time.monotonic() - app._user_stop_ts < 2   # auto-advance suppressed
 
     @pytest.mark.asyncio
@@ -450,6 +565,7 @@ class TestYtmEnqueue(_QueueBase):
         r, dl, stop = await self._enqueue("end")
         assert app.state.current_index == 0
         assert dl.call_args.kwargs["play_first"] is True
+        assert dl.call_args.kwargs["force"] is False      # auto-start only on an idle renderer
         stop.assert_not_called()
 
     @pytest.mark.asyncio
@@ -461,12 +577,87 @@ class TestYtmEnqueue(_QueueBase):
         assert r["count"] == 1 and r["skipped"] == 1
 
     @pytest.mark.asyncio
+    async def test_now_on_empty_queue_also_forces(self):
+        r, dl, stop = await self._enqueue("now")
+        assert dl.call_args.kwargs["force"] is True
+        stop.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_ytm_failure_is_a_clean_502(self):
         def boom(*a):
             raise KeyError("navigationEndpoint")
         with pytest.raises(app.HTTPException) as ei:
             await app._ytm_call(boom)
         assert ei.value.status_code == 502
+
+
+class TestBatchAutoStart(_QueueBase):
+    """First download of a batch: 'now' (force) takes the renderer even if it
+    is playing; a plain auto-start only starts on an idle renderer. Skips are
+    logged, never silent."""
+
+    def setup_method(self):
+        super().setup_method()
+        self.orig_cache = app.CACHE_DIR
+        app.CACHE_DIR = Path(self.tmpdir)
+        app.state.queue.append(app.Track(id="old", title="old", artist="", source_type="youtube",
+                                         source_url="u-old", local_path="/old.mp3"))
+        self.new = [app.Track(id=f"new{i}", title=f"New {i}", artist="", source_type="youtube",
+                              source_url=f"u-new{i}") for i in (1, 2)]
+        app.state.queue.extend(self.new)
+        app.state.current_index = 1     # ytm_enqueue pointed it at the first new track
+
+    def teardown_method(self):
+        app.CACHE_DIR = self.orig_cache
+        super().teardown_method()
+
+    async def run_batch(self, transport, force, fail_first=False):
+        async def dl(url, tid):
+            if fail_first and tid == "new1":
+                raise RuntimeError("yt-dlp failed")
+            return {"local_path": f"/{tid}.mp3", "content_type": "audio/mpeg",
+                    "content_length": 1, "title": f"New {tid[-1]}", "artist": "", "duration": 200}
+        with patch.object(app, "download_youtube", side_effect=dl), \
+             patch.object(app, "_device_ready", return_value=True), \
+             patch.object(app, "dlna_get_transport_state", new_callable=AsyncMock, return_value=transport), \
+             patch.object(app, "_play_current", new_callable=AsyncMock) as play:
+            await app._run_playlist_batch(list(self.new), play_first=True, force=force)
+        return play
+
+    @pytest.mark.asyncio
+    async def test_now_takes_over_a_playing_renderer(self):
+        """10:56 on 2026-11-02: Volumio had restarted its own queue; 'now' must still play."""
+        play = await self.run_batch("PLAYING", force=True)
+        play.assert_awaited_once()
+        assert app.state.current_index == 1 and app.state.queue[1].id == "new1"
+
+    @pytest.mark.asyncio
+    async def test_plain_auto_start_leaves_a_playing_renderer_and_logs(self, caplog):
+        with caplog.at_level("INFO", logger="bulb_voice"):
+            play = await self.run_batch("PLAYING", force=False)
+        play.assert_not_called()
+        assert "Not auto-starting New 1: renderer is PLAYING" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_plain_auto_start_on_idle_renderer(self):
+        play = await self.run_batch("STOPPED", force=False)
+        play.assert_awaited_once()
+        assert app.state.queue[app.state.current_index].id == "new1"
+
+    @pytest.mark.asyncio
+    async def test_now_respects_a_pick_made_during_the_download(self, caplog):
+        app.state.current_index = 0     # user chose "old" while new1 downloaded
+        with caplog.at_level("INFO", logger="bulb_voice"):
+            play = await self.run_batch("PLAYING", force=True)
+        play.assert_not_called()
+        assert app.state.current_index == 0
+        assert "queue moved to another track" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_now_plays_next_new_track_when_first_fails(self):
+        play = await self.run_batch("PLAYING", force=True, fail_first=True)
+        play.assert_awaited_once()
+        assert app.state.queue[app.state.current_index].id == "new2"
 
 
 class TestNextRefreshesGaplessSuccessor(_QueueBase):
@@ -484,27 +675,83 @@ class TestNextRefreshesGaplessSuccessor(_QueueBase):
                                              source_url=f"https://www.youtube.com/watch?v={t * 11}",
                                              local_path=f"/{t}.mp3"))
         app.state.current_index = 0
+        app._playing_foreign = False
 
     def teardown_method(self):
         app.CACHE_DIR = self.orig_cache
+        app._playing_foreign = False
         super().teardown_method()
 
-    @pytest.mark.asyncio
-    async def test_inserted_next_track_becomes_the_gapless_successor(self):
+    OURS_A = f"{app.BASE_URL}/stream/A"
+
+    async def enqueue_next_and_download(self, position):
+        """Preload B, insert X with 'next', run the real batch. `position` is what
+        the renderer reports while X lands (dict, exception, or side_effect fn).
+        Returns the dlna_set_next_uri mock."""
         async def dl(url, tid):
             return {"local_path": f"/{tid}.mp3", "content_type": "audio/mpeg", "content_length": 1,
                     "title": "X", "artist": "", "duration": 200}
+        pos = AsyncMock(return_value=position) if isinstance(position, dict) else AsyncMock(side_effect=position)
         with patch.object(app, "_device_ready", return_value=True), \
              patch.object(app, "dlna_set_next_uri", new_callable=AsyncMock) as set_next, \
+             patch.object(app, "dlna_get_position", pos), \
              patch.object(app, "_ytm_resolve", new_callable=AsyncMock, return_value=_tracks("xxxxxxxxxxx")), \
              patch.object(app, "download_youtube", side_effect=dl), \
              patch("asyncio.create_task") as ct:
             await app._preload_next()
             assert set_next.call_args.args[0].id == "B"          # renderer has B queued
+            set_next.reset_mock()
             await app.ytm_enqueue(app.YtmEnqueueRequest(kind="song", id="x", mode="next"))
             assert [t.title for t in app.state.queue] == ["A", "Txxxxxxxxxxx", "B"]
             await ct.call_args.args[0]                            # run the download batch
+        return set_next
+
+    @pytest.mark.asyncio
+    async def test_inserted_next_track_becomes_the_gapless_successor(self):
+        set_next = await self.enqueue_next_and_download({"track_uri": self.OURS_A})
         assert set_next.call_args.args[0].title == "X"          # renderer now plays X after A
+
+    @pytest.mark.asyncio
+    async def test_renderer_without_trackuri_still_gets_the_successor(self):
+        set_next = await self.enqueue_next_and_download({"track_uri": ""})
+        assert set_next.call_args.args[0].title == "X"
+
+    @pytest.mark.asyncio
+    async def test_no_successor_once_a_foreign_owner_was_detected(self):
+        """Reviewer's probe: HA announcement seen by a PLAYING poll, then X lands."""
+        foreign = {"track_uri": "http://ha.local/tts/announce.mp3", "position": 3, "duration": 9}
+        with patch.object(app, "dlna_get_position", new_callable=AsyncMock, return_value=foreign):
+            await app._note_playback_owner()
+        assert app._playing_foreign is True
+        set_next = await self.enqueue_next_and_download(foreign)
+        set_next.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_successor_when_taken_over_during_the_download(self, caplog):
+        """Last poll still saw our A, but the renderer is someone else's by now."""
+        with caplog.at_level("INFO", logger="bulb_voice"):
+            set_next = await self.enqueue_next_and_download({"track_uri": "http://127.0.0.1/USB/x.mp3"})
+        set_next.assert_not_called()
+        assert "Not preloading X: the renderer is playing something else" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_no_successor_when_renderer_plays_another_of_our_tracks(self):
+        set_next = await self.enqueue_next_and_download({"track_uri": f"{app.BASE_URL}/stream/B"})
+        set_next.assert_not_called()                             # gapless sync owns this case
+
+    @pytest.mark.asyncio
+    async def test_no_successor_when_the_ownership_read_fails(self):
+        set_next = await self.enqueue_next_and_download(OSError("timeout"))
+        set_next.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_successor_after_a_device_switch_during_the_read(self):
+        def switch(*a, **k):
+            app.device = MagicMock(friendly_name="Bose_out")  # user picked another speaker
+            return {"track_uri": self.OURS_A}
+        with patch.object(app, "device", MagicMock(friendly_name="Volumio-UPnP/AV")):
+            set_next = await self.enqueue_next_and_download(switch)
+        set_next.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_end_mode_does_not_touch_the_successor(self):

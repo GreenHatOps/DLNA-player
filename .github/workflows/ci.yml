@@ -25,7 +25,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest test_app.py -v
+        run: pytest test_app.py test_garage.py -v
 
   docker:
     runs-on: ubuntu-latest
