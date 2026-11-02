@@ -22,6 +22,17 @@
   --err: #FF6B5E;
   --idle: #50565A;
   --disabled: #949A9D;
+  --key-on: #16181B;      /* a switched-on key: pushed in, darker face */
+  /* Backlit display: blue LED light from small LEDs along the bottom edge */
+  --lcd-ink: #0F1B27;     /* 8.8:1 in the darkest corner */
+  --lcd-ink-muted: #223241;   /* 4.6:1 measured against the darkest rendered glass */
+  --lcd-needle: #B5140E;  /* deeper red so the needle holds against the lit blue */
+  --lcd-light:
+    radial-gradient(60% 55% at 25% 108%, rgba(214, 236, 255, .95), rgba(214, 236, 255, 0) 70%),
+    radial-gradient(60% 55% at 75% 108%, rgba(214, 236, 255, .95), rgba(214, 236, 255, 0) 70%),
+    radial-gradient(120% 90% at 50% 120%, rgba(207, 227, 245, 1), rgba(207, 227, 245, 0) 75%),
+    linear-gradient(180deg, #9FBBD6 0%, #B3CDE6 55%, #C7DCEF 100%);
+  --lcd-falloff: inset 0 8px 24px rgba(0, 0, 0, .22), inset 0 2px 3px rgba(0, 0, 0, .28), 0 1px 0 var(--edge);  /* the top, furthest from the LEDs, falls off */
   --rim: #666C6F;        /* field edge, 3.3:1 on chassis */
 
   --r-groove: 3px;
@@ -90,13 +101,9 @@ button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent
   box-shadow: var(--pressed);
 }
 /* Switched on (Play while playing, latched Repeat / Shuffle, the selected speaker):
-   the key stays pushed in and an LED behind the face lights its icon and legend. */
-.key[aria-pressed="true"], .key.lit, .device-item.active .d-name {
-  color: var(--ok);
-  text-shadow: 0 0 6px rgba(76, 194, 122, .55);
-}
-.key[aria-pressed="true"] svg, .key.lit svg {
-  filter: drop-shadow(0 0 4px rgba(76, 194, 122, .6));
+   the key stays pushed in with a darker grey face. */
+.key[aria-pressed="true"], .key.lit, .device-item.active {
+  background: var(--key-on);
 }
 .key:focus-visible, .device-btn:focus-visible, .picker-refresh:focus-visible, #btn-add:focus-visible,
 .result-item .r-add:focus-visible, .queue-item .q-play:focus-visible, .device-item:focus-visible,
@@ -152,12 +159,12 @@ header h1 {
 .status { color: var(--text); }
 
 /* Now Playing: the display window */
-.now-playing {
-  background: var(--display);
-  color: var(--ink);
+.now-playing {               /* a backlit LCD: blue light from LEDs along the bottom edge */
+  background: var(--lcd-light);
+  color: var(--lcd-ink);
   border: 1px solid var(--seam);
   border-radius: var(--r-window);
-  box-shadow: var(--recessed);
+  box-shadow: var(--lcd-falloff);
   padding: 16px;
 }
 
@@ -174,7 +181,7 @@ header h1 {
 
 .track-info .artist {
   font: 500 16px/24px var(--body);
-  color: var(--ink-muted);
+  color: var(--lcd-ink-muted);
   margin-top: 4px;
   white-space: nowrap;
   overflow: hidden;
@@ -191,7 +198,7 @@ header h1 {
   margin-top: 16px;
   font: 700 22px/1 var(--dot);
   font-variant-numeric: tabular-nums;
-  color: var(--ink);
+  color: var(--lcd-ink);
 }
 #pos-current { grid-area: cur; }
 #pos-duration { grid-area: dur; }
@@ -202,7 +209,7 @@ header h1 {
   overflow: hidden;
   height: 24px;
   cursor: pointer;
-  background: repeating-linear-gradient(90deg, var(--ink) 0 1px, transparent 1px 8px) bottom / 100% 8px no-repeat;
+  background: repeating-linear-gradient(90deg, var(--lcd-ink) 0 1px, transparent 1px 8px) bottom / 100% 8px no-repeat;
 }
 .progress-bar::after {
   content: "";
@@ -211,7 +218,7 @@ header h1 {
   right: 0;
   bottom: 0;
   height: 1px;
-  background: var(--ink);
+  background: var(--lcd-ink);
 }
 
 .progress-fill {             /* a layer carrying the red needle; app.js sets translateX(pct%) */
@@ -231,7 +238,7 @@ header h1 {
   bottom: 0;
   left: 0;
   width: 2px;
-  background: var(--needle);
+  background: var(--lcd-needle);
 }
 
 /* Controls: transport keys, then a smaller row Stop / Repeat / Shuffle */
@@ -340,11 +347,11 @@ header h1 {
   text-align: center;
   font: 700 22px/1 var(--dot);
   font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  background: var(--display);
+  color: var(--lcd-ink);
+  background: var(--lcd-light);
   border: 1px solid var(--seam);
   border-radius: var(--r-window);
-  box-shadow: var(--recessed);
+  box-shadow: var(--lcd-falloff);
 }
 
 /* Add Section */
@@ -492,8 +499,8 @@ header h1 {
 }
 
 .queue-item.focus { border-color: var(--edge); background-color: var(--key); }
-/* The playing card is outlined in the needle red, following its rounded corners */
-.queue-item.active { border: 2px solid var(--needle); }
+/* The playing card is outlined (1px, like the other cards) in the needle red */
+.queue-item.active { border-color: var(--needle); }
 .queue-item.active .q-idx { color: var(--text); }
 .queue-item:not(.focus) .q-remove,
 .queue-item:not(.focus) .q-play { display: none; }
