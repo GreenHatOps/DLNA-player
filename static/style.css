@@ -41,10 +41,6 @@
   --r-key: 12px;         /* rounded keys; set both to 999px for pills */
   --r-key-lg: 16px;
 
-  --deck-h: 360px;        /* Rolodex height: app.js fits it to the space left on the first screen */
-  /* Fluid sizes: scale with the screen height between phone limits (keys never below 44px) */
-  --gap: clamp(8px, 1.5vh, 16px);
-
   --cond: "Barlow Condensed", "Arial Narrow", sans-serif;
   --body: "Barlow", "Helvetica Neue", sans-serif;
   --dot: "Doto", "Barlow Condensed", monospace;
@@ -69,12 +65,12 @@ html, body {
   max-width: 480px;
   margin: 0 auto;
   padding: 16px;
-  padding-top: max(var(--gap), env(safe-area-inset-top));
+  padding-top: max(16px, env(safe-area-inset-top));
   padding-bottom: max(24px, env(safe-area-inset-bottom));
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: 16px;
 }
 
 button { font: inherit; color: inherit; -webkit-tap-highlight-color: transparent; }
@@ -169,12 +165,11 @@ header h1 {
   border: 1px solid var(--seam);
   border-radius: var(--r-window);
   box-shadow: var(--lcd-falloff);
-  padding: clamp(8px, 1.6vh, 16px) clamp(12px, 3.5vw, 16px);
+  padding: 16px;
 }
 
 .track-info .title {
-  font: 600 clamp(20px, 3.6vh, 32px)/1.08 var(--cond);
-  min-height: 2.16em;          /* always two lines tall: the queue below never jumps between tracks */
+  font: 600 32px/34px var(--cond);
   letter-spacing: -.005em;
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -185,10 +180,9 @@ header h1 {
 }
 
 .track-info .artist {
-  font: 500 clamp(14px, 2vh, 16px)/1.4 var(--body);
-  min-height: 1.4em;           /* reserved before the first status arrives */
+  font: 500 16px/24px var(--body);
   color: var(--lcd-ink-muted);
-  margin-top: 2px;
+  margin-top: 4px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -197,12 +191,12 @@ header h1 {
 /* Readouts on top, a printed scale with the red needle below */
 .progress-wrap {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: "cur bar dur";
-  align-items: center;
-  column-gap: 8px;
-  margin-top: clamp(4px, 1vh, 12px);
-  font: 700 clamp(20px, 2.8vh, 22px)/1 var(--dot);
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "cur dur" "bar bar";
+  align-items: baseline;
+  row-gap: 8px;
+  margin-top: 16px;
+  font: 700 22px/1 var(--dot);
   font-variant-numeric: tabular-nums;
   color: var(--lcd-ink);
 }
@@ -213,7 +207,7 @@ header h1 {
   grid-area: bar;
   position: relative;
   overflow: hidden;
-  height: 20px;
+  height: 24px;
   cursor: pointer;
   background: repeating-linear-gradient(90deg, var(--lcd-ink) 0 1px, transparent 1px 8px) bottom / 100% 8px no-repeat;
 }
@@ -261,12 +255,12 @@ header h1 {
 }
 .transport .key {
   flex-direction: column;
-  min-height: clamp(48px, 7vh, 56px);
-  padding: 4px 0;
+  min-height: 56px;
+  padding: 8px 0 4px;
   font-size: 14px;
 }
 .transport .play-btn {
-  min-height: clamp(52px, 8vh, 64px);
+  min-height: 64px;
   border-radius: var(--r-key-lg);
 }
 
@@ -388,7 +382,7 @@ header h1 {
 .queue-section h2 {
   font: 600 16px/1.2 var(--cond);
   color: var(--muted);
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
 .queue-section h2 { display: flex; align-items: baseline; gap: 8px; }
@@ -463,7 +457,7 @@ header h1 {
    #queue-stage sticks to its top and holds the cards in 3D. */
 #queue-list {
   position: relative;
-  height: var(--deck-h);
+  height: 360px;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -477,7 +471,7 @@ header h1 {
 #queue-stage {
   position: sticky;
   top: 0;
-  height: var(--deck-h);
+  height: 360px;
   perspective: 900px;
   perspective-origin: 50% 50%;
 }
@@ -511,8 +505,7 @@ header h1 {
 .queue-item:not(.focus) .q-remove,
 .queue-item:not(.focus) .q-play { display: none; }
 
-/* The hint stays for screen readers (aria-describedby), hidden on screen to save height */
-.queue-help { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.queue-help { color: var(--muted); font-size: 14px; margin: 8px 0; }
 .queue-item .q-play {
   position: absolute;
   right: 8px;
@@ -885,11 +878,9 @@ header h1 {
 .app-main {
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: 16px;
   flex: 1;
 }
-/* Same order on every phone: display, controls, volume, queue on the first screen; search and logs below */
-.add-section, .search-results, .log-section { order: 1; }
 
 .skip {
   position: absolute;
