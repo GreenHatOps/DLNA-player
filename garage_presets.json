@@ -1,0 +1,12 @@
+{
+  "_comment": "Garage Bose presets 1-6. Plain http only (the SoundTouch renderer rejects https). Same URLs as bose_out/scripts.yaml, the HA template sensor and the Morpheus bridge (task_executor.GARAGE_PRESETS) — HA recognises the playing preset by this exact URL, so keep all copies in step. freq/ps only place the station on the garage page's FM dial (made-up positions, not real FM frequencies); the other copies don't need them.",
+  "device": "Bose_out",
+  "presets": [
+    {"name": "Radio România Actualități", "url": "http://89.238.227.6:8006/", "type": "audio/aacp", "freq": 91.8, "ps": "RRA ACT"},
+    {"name": "Radio Guerrilla", "url": "http://live.guerrillaradio.ro:8010/guerrilla.aac", "type": "audio/aacp", "freq": 94.8, "ps": "GUERILLA"},
+    {"name": "Jazz Radio Blues", "url": "http://jazzblues.ice.infomaniak.ch/jazzblues-high.mp3", "type": "audio/mpeg", "freq": 97.4, "ps": "JAZZBLUE"},
+    {"name": "Magic FM", "url": "http://live.magicfm.ro/magicfm.aacp", "type": "audio/aac", "freq": 89.5, "ps": "MAGIC FM"},
+    {"name": "Classic Jazz", "url": "http://jazz-wr01.ice.infomaniak.ch/jazz-wr01-128.mp3", "type": "audio/mpeg", "freq": 101.2, "ps": "CL.JAZZ"},
+    {"name": "Virgin Radio Classic Rock", "url": "http://icy.unitedradio.it/VirginRockClassics.mp3", "type": "audio/mpeg", "freq": 104.6, "ps": "VIRGIN"}
+  ]
+}

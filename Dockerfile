@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+COPY app.py soundtouch.py ytmusic.py garage_presets.json ./
 COPY static/ static/
 
 RUN mkdir -p cache
