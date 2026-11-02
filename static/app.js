@@ -148,8 +148,14 @@ function setLamp(state, word) {
 // are in the DOM (the queue can hold hundreds). Later cards fan beneath
 // the focused card and bend away; earlier cards fan above and bend back.
 const CARD_H = 104;      // px, must match .queue-item height
-const WHEEL_CENTER = 180; // px, half the queue-stage height
-const WHEEL_RADIUS = 180;
+// Wheel geometry follows the deck height (--deck-h: 360px, 260px on short screens).
+let WHEEL_CENTER = 180;  // px, half the queue-stage height
+let WHEEL_RADIUS = 180;
+function measureWheel() {
+  const h = els.queueStage.clientHeight || 360;
+  WHEEL_CENTER = h / 2;
+  WHEEL_RADIUS = h / 2;
+}
 const CARD_ANGLE = 28;   // degrees between cards around the cylinder
 const STEP = 56;         // px of scroll per card
 const NEAR = 4;
@@ -344,7 +350,21 @@ els.queueList.addEventListener("scroll", () => {
     if (Math.abs(pos - i) > 0.02) scrollQueueTo(i);
   }, 120);
 }, { passive: true });
-window.addEventListener("resize", () => layoutCards());
+// Fit the deck to the space left on the first screen so the ruler is always in view
+// on every phone (iPhone SE to Pro Max): clamp between 140 and 420px (a 140px deck still shows the whole 104px front card).
+const DECK_MIN = 140, DECK_MAX = 420;
+function fitDeck() {
+  const top = els.queueList.getBoundingClientRect().top + window.scrollY;
+  const ruler = 44 + 2;                       // #queue-scroll height + margin
+  const bottom = 8;                           // breathing room under the ruler
+  const h = Math.round(Math.min(DECK_MAX, Math.max(DECK_MIN, window.innerHeight - top - ruler - bottom)));
+  document.documentElement.style.setProperty("--deck-h", `${h}px`);
+  measureWheel();
+  layoutCards();
+}
+fitDeck();
+document.fonts.ready.then(fitDeck);           // web fonts change the heights above the deck
+window.addEventListener("resize", fitDeck);
 
 // Drag the tuning scale left/right to move through the queue fast. The x position
 // maps onto the same track updateQueuePos() draws (22px inset each side).
