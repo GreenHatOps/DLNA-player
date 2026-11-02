@@ -2,6 +2,7 @@ const $ = (sel) => document.querySelector(sel);
 
 const els = {
   status: $("#device-status"),
+  statusWord: $("#device-status .lamp-word"),
   deviceName: $("#device-name"),
   btnDevices: $("#btn-devices"),
   devicePicker: $("#device-picker"),
@@ -13,6 +14,7 @@ const els = {
   posDur: $("#pos-duration"),
   progress: $("#progress-fill"),
   btnPlay: $("#btn-play"),
+  playLabel: $("#play-label"),
   iconPlay: $("#icon-play"),
   iconPause: $("#icon-pause"),
   btnPrev: $("#btn-prev"),
@@ -88,7 +90,7 @@ function tickDisplay() {
   els.posCur.textContent = fmt(pos);
   els.posDur.textContent = fmt(knownDuration);
   const pct = knownDuration > 0 ? (pos / knownDuration) * 100 : 0;
-  els.progress.style.width = `${pct}%`;
+  els.progress.style.transform = `translateX(${pct}%)`;   // the red needle on the printed scale
 }
 
 // --- Poll status ---
@@ -96,16 +98,9 @@ async function poll() {
   try {
     const s = await api("GET", "/status");
 
-    if (s.device_connected) {
-      els.status.textContent = "connected";
-      els.status.className = "status online";
-    } else if (s.device_name) {
-      els.status.textContent = "connecting";
-      els.status.className = "status offline";
-    } else {
-      els.status.textContent = "no speaker";
-      els.status.className = "status offline";
-    }
+    if (s.device_connected) setLamp("ok", "Connected");
+    else if (s.device_name) setLamp("warn", "Connecting");
+    else setLamp("", "No speaker");
 
     els.deviceName.textContent = s.device_name || "Select speaker";
 
@@ -124,6 +119,9 @@ async function poll() {
     isPlaying = s.transport_state === "PLAYING";
     els.iconPlay.style.display = isPlaying ? "none" : "block";
     els.iconPause.style.display = isPlaying ? "block" : "none";
+    els.playLabel.textContent = isPlaying ? "Pause" : "Play";
+    els.btnPlay.classList.toggle("lit", isPlaying);   // pushed in and backlit while playing
+    els.btnPlay.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
 
     if (!volumeTimeout) {
       els.volume.value = s.volume;
@@ -134,9 +132,14 @@ async function poll() {
     renderDownload(s.download);
     updateModeIcon(s.play_mode || "NORMAL");
   } catch {
-    els.status.textContent = "offline";
-    els.status.className = "status offline";
+    setLamp("err", "Offline");
   }
+}
+
+// Status lamp: a light plus its word (DESIGN.md: lamps always carry a word)
+function setLamp(state, word) {
+  els.status.className = state ? `lamp ${state}` : "lamp";
+  els.statusWord.textContent = word;
 }
 
 // --- Queue (Rolodex) ---
@@ -145,8 +148,14 @@ async function poll() {
 // are in the DOM (the queue can hold hundreds). Later cards fan beneath
 // the focused card and bend away; earlier cards fan above and bend back.
 const CARD_H = 104;      // px, must match .queue-item height
-const WHEEL_CENTER = 180; // px, half the queue-stage height
-const WHEEL_RADIUS = 180;
+// Wheel geometry follows the deck height (--deck-h, fitted by fitDeck below).
+let WHEEL_CENTER = 180;  // px, half the queue-stage height
+let WHEEL_RADIUS = 180;
+function measureWheel() {
+  const h = els.queueStage.clientHeight || 360;
+  WHEEL_CENTER = h / 2;
+  WHEEL_RADIUS = h / 2;
+}
 const CARD_ANGLE = 28;   // degrees between cards around the cylinder
 const STEP = 56;         // px of scroll per card
 const NEAR = 4;
@@ -289,8 +298,9 @@ function layoutCards() {
   updateQueuePos();
 }
 
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
 function scrollQueueTo(i, smooth = true) {
-  els.queueList.scrollTo({ top: i * STEP, behavior: smooth ? "smooth" : "auto" });
+  els.queueList.scrollTo({ top: i * STEP, behavior: smooth && !reduceMotion.matches ? "smooth" : "auto" });
 }
 
 function scrollQueueToActive() {
@@ -333,13 +343,69 @@ let snapTimer = null;
 els.queueList.addEventListener("scroll", () => {
   if (!layoutRaf) layoutRaf = requestAnimationFrame(() => { layoutRaf = 0; layoutCards(); });
   clearTimeout(snapTimer);
+  if (rulerDrag) return;   // the drag settles the deck itself when the finger lifts
   snapTimer = setTimeout(() => {
     const pos = queuePos();
     const i = Math.round(pos);
     if (Math.abs(pos - i) > 0.02) scrollQueueTo(i);
   }, 120);
 }, { passive: true });
-window.addEventListener("resize", () => layoutCards());
+// Fit the Rolodex between the display and the thumb zone so the queue and its ruler
+// are on the first screen. On phones the thumb zone is pinned to the bottom (sticky),
+// so its height comes off; on desktop it sits in the left column. Keys, gaps and
+// type keep their sizes: only the deck gives.
+const thumbZone = $(".thumb");
+const DECK_MIN = 140;                       // still shows the whole 104px front card
+function fitDeck() {
+  const pinned = getComputedStyle(thumbZone).position === "sticky";
+  const top = els.queueList.getBoundingClientRect().top + window.scrollY;
+  const ruler = 44 + 2;                     // #queue-scroll height + margin
+  let avail;
+  if (pinned) {
+    avail = window.innerHeight - top - ruler - 8 - thumbZone.offsetHeight;
+  } else {
+    // Desktop: end the queue column level with the search field so both columns finish together
+    avail = els.form.getBoundingClientRect().bottom + window.scrollY - top - ruler;
+  }
+  const h = Math.round(Math.min(pinned ? 420 : 520, Math.max(DECK_MIN, avail)));
+  document.documentElement.style.setProperty("--deck-h", `${h}px`);
+  measureWheel();
+  layoutCards();
+}
+fitDeck();
+document.fonts.ready.then(fitDeck);         // web fonts change the heights above the deck
+window.addEventListener("resize", fitDeck);
+// The speaker picker opens above the display and pushes the deck down: refit on toggle.
+new MutationObserver(fitDeck).observe(els.devicePicker, { attributes: true, attributeFilter: ["class"] });
+
+// Drag the tuning scale left/right to move through the queue fast. The x position
+// maps onto the same track updateQueuePos() draws (22px inset each side).
+// A tap on the red needle still returns to the playing track (its own click handler).
+let rulerDrag = false;
+function scrubTo(clientX) {
+  const n = queueItems.length;
+  if (n < 2) return;
+  const r = els.queueScroll.getBoundingClientRect();
+  const trackW = Math.max(1, r.width - 44);
+  const pos = Math.min(n - 1, Math.max(0, ((clientX - r.left - 22) / trackW) * (n - 1)));
+  els.queueList.scrollTop = pos * STEP;
+}
+els.queueScroll.addEventListener("pointerdown", (e) => {
+  if (e.target === els.queuePlaying || e.button > 0) return;
+  rulerDrag = true;
+  els.queueScroll.classList.add("dragging");
+  try { els.queueScroll.setPointerCapture(e.pointerId); } catch {}   // capture is a nicety; the scrub works without it
+  scrubTo(e.clientX);
+});
+els.queueScroll.addEventListener("pointermove", (e) => { if (rulerDrag) scrubTo(e.clientX); });
+function endRulerDrag() {
+  if (!rulerDrag) return;
+  rulerDrag = false;
+  els.queueScroll.classList.remove("dragging");
+  scrollQueueTo(Math.round(queuePos()));
+}
+els.queueScroll.addEventListener("pointerup", endRulerDrag);
+els.queueScroll.addEventListener("pointercancel", endRulerDrag);
 
 // --- Download progress ---
 function renderDownload(dl) {
@@ -357,7 +423,7 @@ function renderDownload(dl) {
   wrap.classList.remove("hidden");
   const current = dl.current || "";
   if (dl.total === 1) {
-    text.textContent = current || "Downloading...";
+    text.textContent = current || "Downloading";
   } else {
     text.textContent = current || "Playlist downloading";
   }
@@ -374,7 +440,7 @@ function renderDownload(dl) {
   const failed = dl.failed ? ` • ${dl.failed} failed` : "";
   count.textContent = (dl.total === 1 ? (eta || "") : `${dl.done}/${dl.total}${eta}`) + failed;
   const pct = dl.total > 0 ? (dl.done / dl.total) * 100 : 0;
-  fill.style.width = `${pct}%`;
+  fill.style.transform = `scaleX(${pct / 100})`;
 
   // Render track list for playlists
   if (dl.tracks && dl.tracks.length > 1) {
@@ -422,6 +488,8 @@ async function doSearch(query) {
       return;
     }
 
+    // Results sit below the queue: bring them into view once rendered (after the loop).
+    requestAnimationFrame(() => els.searchResults.scrollIntoView({ block: "start", behavior: reduceMotion.matches ? "auto" : "smooth" }));
     data.results.forEach((r) => {
       const li = document.createElement("li");
       li.className = "result-item";
@@ -430,9 +498,11 @@ async function doSearch(query) {
           <div class="r-title">${esc(r.title)}</div>
           <div class="r-artist">${esc(r.artist)} &middot; ${fmt(r.duration)}</div>
         </div>
-        <button class="r-add">+</button>
+        <button class="r-add" type="button">Add</button>
       `;
 
+      // Set via setAttribute, not the template: esc() does not escape quotes, so a title must never go into an attribute there.
+      li.querySelector(".r-add").setAttribute("aria-label", `Add ${r.title} to the queue`);
       li.querySelector(".r-add").addEventListener("click", async (e) => {
         e.stopPropagation();
         const btn = e.currentTarget;
@@ -557,27 +627,27 @@ $(".progress-bar").addEventListener("click", (e) => {
   send("POST", "/seek", { position: pos });
 });
 
-// Play mode toggle
-const modes = ["NORMAL", "REPEAT_ALL", "REPEAT_ONE", "SHUFFLE"];
-$("#btn-mode").addEventListener("click", () => {
-  const cur = modes.indexOf(currentMode);
-  const next = modes[(cur + 1) % modes.length];
-  currentMode = next;
-  updateModeIcon(next);
-  send("POST", "/play-mode", { mode: next });
-});
-
+// Play mode: two latching keys over the one play_mode enum.
+// Repeat cycles off -> all -> one -> off; Shuffle toggles. Latching one unlatches the other.
 let currentMode = "NORMAL";
+const REPEAT_NEXT = { NORMAL: "REPEAT_ALL", REPEAT_ALL: "REPEAT_ONE", REPEAT_ONE: "NORMAL", SHUFFLE: "REPEAT_ALL" };
+
+function setMode(mode) {
+  updateModeIcon(mode);
+  send("POST", "/play-mode", { mode });
+}
+$("#btn-repeat").addEventListener("click", () => setMode(REPEAT_NEXT[currentMode] || "NORMAL"));
+$("#btn-shuffle").addEventListener("click", () => setMode(currentMode === "SHUFFLE" ? "NORMAL" : "SHUFFLE"));
 
 function updateModeIcon(mode) {
   currentMode = mode;
-  $("#icon-mode-normal").style.display = mode === "NORMAL" ? "block" : "none";
-  $("#icon-mode-repeat").style.display = mode === "REPEAT_ALL" ? "block" : "none";
-  $("#icon-mode-repeat1").style.display = mode === "REPEAT_ONE" ? "block" : "none";
-  $("#icon-mode-shuffle").style.display = mode === "SHUFFLE" ? "block" : "none";
-  const btn = $("#btn-mode");
-  btn.classList.toggle("mode-active", mode !== "NORMAL");
-  btn.title = {NORMAL:"Sequential", REPEAT_ALL:"Repeat all", REPEAT_ONE:"Repeat one", SHUFFLE:"Shuffle"}[mode];
+  const repeat = mode === "REPEAT_ALL" || mode === "REPEAT_ONE";
+  $("#btn-repeat").setAttribute("aria-pressed", String(repeat));
+  // One row of keys leaves no room for "Repeat one": the icon shows the mode (a "1" for one)
+  $("#icon-repeat").style.display = mode === "REPEAT_ONE" ? "none" : "block";
+  $("#icon-repeat-one").style.display = mode === "REPEAT_ONE" ? "block" : "none";
+  $("#btn-repeat").setAttribute("aria-label", "Repeat: " + ({ REPEAT_ALL: "all", REPEAT_ONE: "one" }[mode] || "off"));
+  $("#btn-shuffle").setAttribute("aria-pressed", String(mode === "SHUFFLE"));
 }
 
 els.volume.addEventListener("input", () => {
@@ -588,6 +658,15 @@ els.volume.addEventListener("input", () => {
     volumeTimeout = null;
   }, 200);
 });
+
+// Volume keys: a drag must never be the only way to change volume
+function nudgeVolume(delta) {
+  const v = Math.max(0, Math.min(100, parseInt(els.volume.value, 10) + delta));
+  els.volume.value = v;
+  els.volume.dispatchEvent(new Event("input"));
+}
+$("#vol-down").addEventListener("click", () => nudgeVolume(-5));
+$("#vol-up").addEventListener("click", () => nudgeVolume(5));
 
 // --- Add / Search form ---
 els.form.addEventListener("submit", async (e) => {
@@ -631,7 +710,8 @@ let logInterval = null;
 logToggle.addEventListener("click", () => {
   logOpen = !logOpen;
   logPanel.classList.toggle("hidden", !logOpen);
-  logToggle.textContent = logOpen ? "Logs (hide)" : "Logs";
+  logToggle.textContent = logOpen ? "Hide logs" : "Logs";
+  logToggle.setAttribute("aria-expanded", String(logOpen));
   if (logOpen) {
     fetchLogs();
     logInterval = setInterval(fetchLogs, 3000);
